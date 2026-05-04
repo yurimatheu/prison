@@ -11,7 +11,7 @@
            signOut, onAuthStateChanged, updateProfile }
     from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
   import { getFirestore, doc, setDoc, getDoc, collection, query,
-           orderBy, limit, getDocs, serverTimestamp }
+           orderBy, limit, getDocs, serverTimestamp, addDoc, onSnapshot }
     from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
   const firebaseConfig = {
@@ -72,30 +72,52 @@
     } catch(e) { console.error('Load error:', e); }
   }
 
-  window.saveToCloud = async function() {
+  let _saveCloudTimer = null;
+  window.saveToCloud = async function(immediate) {
     if (!window._fbUser) return;
+    // Debounce: agrupa saves em janelas de 60s, exceto quando immediate=true
+    if (!immediate) {
+      if (_saveCloudTimer) return; // ja tem um save agendado
+      _saveCloudTimer = setTimeout(async () => {
+        _saveCloudTimer = null;
+        await window.saveToCloud(true);
+      }, 60000);
+      return;
+    }
     try {
       const ref = doc(db, 'saves', window._fbUser.uid);
       await setDoc(ref, {
         gameState: JSON.stringify(G),
         username:  window._fbUser.displayName || window._fbUser.email,
         coins:     G.coins || 0,
+        gems:      G.gems  || 0,
         rank:      G.rank  || 1,
         updatedAt: serverTimestamp()
       });
     } catch(e) { console.error('Save error:', e); }
   };
 
+  let _lbFirebaseCache = null;
+  let _lbFirebaseCacheTs = 0;
+  const LB_FIREBASE_TTL = 5 * 60 * 1000; // 5 minutos
+
   window.loadLeaderboard = async function() {
+    // Retorna cache se ainda valido
+    if (_lbFirebaseCache && (Date.now() - _lbFirebaseCacheTs) < LB_FIREBASE_TTL) {
+      return _lbFirebaseCache;
+    }
     try {
-      const q    = query(collection(db, 'saves'), orderBy('coins', 'desc'), limit(10));
+      const q    = query(collection(db, 'saves'), orderBy('coins', 'desc'), limit(20));
       const snap = await getDocs(q);
       const rows = [];
       snap.forEach(d => rows.push({
         username: d.data().username,
-        coins:    d.data().coins,
-        rank:     d.data().rank
+        coins:    d.data().coins   || 0,
+        gems:     d.data().gems    || 0,
+        rank:     d.data().rank    || 1
       }));
+      _lbFirebaseCache = rows;
+      _lbFirebaseCacheTs = Date.now();
       return rows;
     } catch(e) { return []; }
   };
@@ -150,9 +172,91 @@
   };
 
   window.doLogout = async function() {
-    await window.saveToCloud();   // ✅ window.saveToCloud, não saveToCloud bare
+    await window.saveToCloud(true);  // salva imediatamente antes de sair
     await signOut(auth);
     if (typeof showToast === 'function') showToast('👋 Saindo...');
+  };
+
+  // ── CHAT GLOBAL ─────────────────────────────────────────────────────────
+  window.sendChatMessage = async function(text) {
+    if (!window._fbUser) return;
+    text = text.trim().slice(0, 120);
+    if (!text) return;
+    try {
+      await addDoc(collection(db, 'chat'), {
+        uid: window._fbUser.uid,
+        name: window._fbUser.displayName || window._fbUser.email.split('@')[0],
+        text,
+        ts: serverTimestamp()
+      });
+    } catch(e) { console.error('Chat error:', e); }
+  };
+
+  window.initChat = function() {
+    const q = query(collection(db, 'chat'), orderBy('ts', 'desc'), limit(30));
+    let _lastChatIds = '';
+    onSnapshot(q, (snap) => {
+      // So re-renderiza se a lista de IDs mudou (evita render desnecessario)
+      const ids = snap.docs.map(d => d.id).join(',');
+      if (ids === _lastChatIds) return;
+      _lastChatIds = ids;
+      const msgs = [];
+      snap.forEach(d => msgs.push({ id: d.id, ...d.data() }));
+      msgs.reverse();
+      window._renderChat && window._renderChat(msgs);
+    });
+  };
+
+  // ── SINGLE-USE KEY SYSTEM (Firebase-backed, key vanishes after 1 use) ──────
+  // Admin credentials (only you know these)
+  const ADMIN_USER = 'admin_prison';
+  const ADMIN_PASS = 'PrisonMine2025!';
+
+  // Generate a random key string
+  function _genKeyStr() {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    const seg = () => Array.from({length:5}, () => chars[Math.floor(Math.random()*chars.length)]).join('');
+    return `KEY-${seg()}-${seg()}-${seg()}-${seg()}`;
+  }
+
+  // Admin: create a new single-use key stored in Firestore
+  window.adminCreateKey = async function(adminUser, adminPass, keyType) {
+    if (adminUser !== ADMIN_USER || adminPass !== ADMIN_PASS) {
+      return { ok: false, msg: '❌ Credenciais de admin incorretas!' };
+    }
+    const keyStr = _genKeyStr();
+    try {
+      await setDoc(doc(db, 'singlekeys', keyStr), {
+        type: keyType || 'vip',   // 'vip' or any future type
+        used: false,
+        usedBy: null,
+        usedAt: null,
+        createdAt: serverTimestamp()
+      });
+      return { ok: true, key: keyStr };
+    } catch(e) { return { ok: false, msg: '❌ Erro ao criar key: ' + e.message }; }
+  };
+
+  // Player: redeem a single-use key — returns { ok, type, msg }
+  window.redeemSingleKey = async function(keyStr) {
+    if (!window._fbUser) return { ok: false, msg: '❌ Faça login primeiro!' };
+    keyStr = keyStr.trim().toUpperCase();
+    if (!keyStr) return { ok: false, msg: '❌ Key vazia!' };
+    try {
+      const ref  = doc(db, 'singlekeys', keyStr);
+      const snap = await getDoc(ref);
+      if (!snap.exists()) return { ok: false, msg: '❌ Key inválida ou inexistente!' };
+      const data = snap.data();
+      if (data.used) return { ok: false, msg: '❌ Esta key já foi usada!' };
+      // Mark as used (atomic write)
+      await setDoc(ref, {
+        ...data,
+        used: true,
+        usedBy: window._fbUser.uid,
+        usedAt: serverTimestamp()
+      });
+      return { ok: true, type: data.type || 'vip' };
+    } catch(e) { return { ok: false, msg: '❌ Erro: ' + e.message }; }
   };
 
   // Signal ready for the classic-script event wiring
@@ -294,6 +398,66 @@
     color: var(--muted); text-transform: uppercase; margin-bottom: 8px;
   }
 
+  /* Enchantment collapse */
+  .ench-toggle-btn {
+    width: 100%; background: none; border: 1px solid var(--border);
+    color: var(--muted); font-size: 11px; font-weight: 700;
+    border-radius: 6px; padding: 5px; cursor: pointer; margin-top: 6px;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .ench-toggle-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .ench-extra { overflow: hidden; transition: max-height 0.3s ease; max-height: 0; }
+  .ench-extra.open { max-height: 400px; }
+
+  /* Chat widget */
+  #chat-widget {
+    position: fixed; bottom: 0; left: 16px; width: 300px; z-index: 8000;
+    display: flex; flex-direction: column;
+    border-radius: 10px 10px 0 0; overflow: hidden;
+    box-shadow: 0 -4px 24px rgba(0,0,0,0.5);
+    border: 1px solid var(--border); border-bottom: none;
+  }
+  #chat-header {
+    background: #1a1d24; padding: 8px 12px;
+    display: flex; align-items: center; justify-content: space-between;
+    cursor: pointer; user-select: none;
+    border-bottom: 1px solid var(--border);
+  }
+  #chat-header-title { font-size: 13px; font-weight: 700; color: var(--text); }
+  #chat-toggle-icon { font-size: 14px; color: var(--muted); }
+  #chat-body {
+    background: #0d0f14; display: flex; flex-direction: column;
+    max-height: 320px; transition: max-height 0.3s ease;
+  }
+  #chat-body.collapsed { max-height: 0; overflow: hidden; }
+  #chat-messages {
+    flex: 1; overflow-y: auto; padding: 8px;
+    display: flex; flex-direction: column; gap: 4px;
+    max-height: 240px; min-height: 100px;
+  }
+  #chat-messages::-webkit-scrollbar { width: 4px; }
+  #chat-messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  .chat-msg { font-size: 12px; line-height: 1.4; word-break: break-word; }
+  .chat-msg-name { font-weight: 700; color: var(--accent); margin-right: 4px; }
+  .chat-msg-text { color: var(--text); }
+  .chat-msg-system { color: var(--muted); font-style: italic; font-size: 11px; }
+  #chat-input-row {
+    display: flex; gap: 6px; padding: 8px;
+    border-top: 1px solid var(--border); background: #111318;
+  }
+  #chat-input {
+    flex: 1; background: #1a1d24; border: 1px solid var(--border);
+    border-radius: 6px; padding: 5px 8px; color: var(--text);
+    font-size: 12px; outline: none;
+  }
+  #chat-input:focus { border-color: var(--accent); }
+  #chat-send-btn {
+    background: var(--accent); border: none; border-radius: 6px;
+    padding: 5px 10px; color: #000; font-size: 12px; font-weight: 700;
+    cursor: pointer;
+  }
+  #chat-send-btn:hover { opacity: 0.85; }
+
   /* Pickaxe */
   #pick-icon { font-size: 32px; text-align: center; }
   #pick-name { text-align: center; font-weight: 700; font-size: 14px; margin: 4px 0; }
@@ -326,6 +490,49 @@
   #mine-area {
     display: flex; flex-direction: column; align-items: center; gap: 8px;
   }
+
+  /* FULLSCREEN MODE — only mine visible */
+  #mine-area.mine-fullscreen {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 9000;
+    background: var(--bg); padding: 10px; overflow-y: auto;
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+  }
+  /* Hide everything else when fullscreen is active */
+  body.mine-fs #left-panel,
+  body.mine-fs #right-panel,
+  body.mine-fs #hud-top,
+  body.mine-fs #bottom-bar,
+  body.mine-fs #brainrot-section,
+  body.mine-fs #rng-section,
+  body.mine-fs #chat-widget,
+  body.mine-fs #brainrot-pending-btn,
+  body.mine-fs #toast,
+  body.mine-fs #vip-bar,
+  body.mine-fs #midas-bar-wrap,
+  body.mine-fs #frenzy-bar-wrap,
+  body.mine-fs #event-banner,
+  body.mine-fs #auto-miner-indicator {
+    display: none !important;
+  }
+  /* Make grid expand to fill fullscreen */
+  body.mine-fs #mine-area #grid-wrapper {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    width: 100%; max-width: 900px;
+  }
+  body.mine-fs #mine-area #mine-grid {
+    width: 100%; height: 100%;
+  }
+  /* Fullscreen minimize button */
+  #mine-fs-btn {
+    position: fixed; top: 10px; right: 10px; z-index: 9999;
+    background: rgba(0,0,0,0.7); border: 2px solid var(--accent);
+    color: var(--accent); font-size: 13px; font-weight: 800;
+    padding: 8px 14px; border-radius: 8px; cursor: pointer;
+    display: none; backdrop-filter: blur(4px);
+    transition: all 0.15s;
+  }
+  #mine-fs-btn:hover { background: rgba(201,124,245,0.2); }
+  body.mine-fs #mine-fs-btn { display: block; }
   #mine-header {
     width: 100%; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px;
   }
@@ -1154,10 +1361,11 @@
     </div>
     <div id="lb-status" style="font-size:11px;color:var(--muted);margin-bottom:8px;"></div>
     <!-- Tabs -->
-    <div style="display:flex;gap:6px;margin-bottom:10px;">
+    <div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;">
       <button class="hud-btn lb-tab active" id="tab-gems"   onclick="showLBTab('gems')">💎 Gemas</button>
       <button class="hud-btn lb-tab"         id="tab-blocks" onclick="showLBTab('blocks')">⛏️ Blocos</button>
       <button class="hud-btn lb-tab"         id="tab-coins"  onclick="showLBTab('coins')">🪙 Coins</button>
+      <button class="hud-btn lb-tab"         id="tab-rubi"   onclick="showLBTab('rubi')">💠 Rubi</button>
     </div>
     <div id="lb-content"></div>
     <div style="margin-top:10px;text-align:center;">
@@ -1309,7 +1517,7 @@
     <button class="modal-close" onclick="closeModal('modal-rebirth')">×</button>
     <h2 style="color:#ff6ab0">♻️ Rebirth</h2>
     <div style="font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.6">
-      Rebirth reseta tudo (exceto Brainrots, Skins, Encantamentos) em troca de um multiplicador permanente de Coins e Gemas. Rubi 💠 é obtido na <b style="color:#e84393">⚔️ Gaiola</b> matando mobs!
+      Rebirth reseta rank, coins, picareta e <b style="color:#ff6ab0">todos os seus Brainrots</b> em troca de um multiplicador permanente de Coins e Gemas. Rubi 💠 é obtido na <b style="color:#e84393">⚔️ Gaiola</b> matando mobs!
     </div>
     <div style="background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:12px;">
       <div>Rebirth atual: <b id="rebirth-count-modal" style="color:#ff6ab0">0</b></div>
@@ -1351,13 +1559,11 @@
     <span id="hud-username" style="font-size:12px;color:var(--accent);font-weight:800">👤</span>
     <button id="hud-cloud-save">☁️ Salvar</button>
     <button id="hud-logout">🚪 Sair</button>
-    <button class="hud-btn warn" onclick="sellAll()">💰 Vender Tudo</button>
-    <button class="hud-btn" onclick="openModal('modal-ench')">✨ Encantar</button>
+    <button class="hud-btn warn" onclick="openModal('modal-ench')">✨ Encantar</button>
     <button class="hud-btn" onclick="openModal('modal-inv')">🎒 Inv</button>
     <button class="hud-btn" onclick="openModal('modal-lb')">📊 LB</button>
     <button class="hud-btn" onclick="saveGame();showToast('💾 Salvo!')" title="Salvar agora">💾</button>
     <button class="hud-btn" onclick="openDailyReward()" title="Recompensa Diária" id="daily-btn">🎁</button>
-    <button class="hud-btn" onclick="openQuests()">🎯 Missões</button>
     <button class="hud-btn" style="border-color:#e84393;color:#ff6ab0" onclick="openRebirth()">♻️ Rebirth</button>
   </div>
 
@@ -1387,42 +1593,46 @@
         <span class="ench-name">Multiplicador</span>
         <span class="ench-lvl" id="e-multi-lvl">0</span>
       </div>
-      <div class="ench-row">
-        <span class="ench-name">Explosão</span>
-        <span class="ench-lvl" id="e-explo-lvl">0</span>
+      <!-- Extra encantamentos colapsaveis -->
+      <div class="ench-extra" id="ench-extra">
+        <div class="ench-row">
+          <span class="ench-name">Explosão</span>
+          <span class="ench-lvl" id="e-explo-lvl">0</span>
+        </div>
+        <div class="ench-row">
+          <span class="ench-name">Midas</span>
+          <span class="ench-lvl" id="e-midas-lvl">0</span>
+        </div>
+        <div class="ench-row">
+          <span class="ench-name">Chaveiro</span>
+          <span class="ench-lvl" id="e-keychain-lvl">0</span>
+        </div>
+        <div class="ench-row">
+          <span class="ench-name" style="color:#ff7700">🔴 Laser</span>
+          <span class="ench-lvl" id="e-laser-lvl">0</span>
+        </div>
+        <div class="ench-row">
+          <span class="ench-name" style="color:#ff4444">🔥 Frenzy</span>
+          <span class="ench-lvl" id="e-frenzy-lvl">0</span>
+        </div>
+        <div class="ench-row">
+          <span class="ench-name" style="color:#ffaa00">💎 Tesouro</span>
+          <span class="ench-lvl" id="e-jackpot-lvl">0</span>
+        </div>
+        <div class="ench-row">
+          <span class="ench-name" style="color:#aaaaff">🧲 Ímã</span>
+          <span class="ench-lvl" id="e-magnet-lvl">0</span>
+        </div>
+        <div class="ench-row">
+          <span class="ench-name" style="color:#88eeee">⚡ Relâmpago</span>
+          <span class="ench-lvl" id="e-lightning-lvl">0</span>
+        </div>
+        <div class="ench-row">
+          <span class="ench-name" style="color:#00ccff">🐬 Golfinho</span>
+          <span class="ench-lvl" id="e-golfinho-lvl">0</span>
+        </div>
       </div>
-      <div class="ench-row">
-        <span class="ench-name">Midas</span>
-        <span class="ench-lvl" id="e-midas-lvl">0</span>
-      </div>
-      <div class="ench-row">
-        <span class="ench-name">Chaveiro</span>
-        <span class="ench-lvl" id="e-keychain-lvl">0</span>
-      </div>
-      <div class="ench-row">
-        <span class="ench-name" style="color:#ff7700">🔴 Laser</span>
-        <span class="ench-lvl" id="e-laser-lvl">0</span>
-      </div>
-      <div class="ench-row">
-        <span class="ench-name" style="color:#ff4444">🔥 Frenzy</span>
-        <span class="ench-lvl" id="e-frenzy-lvl">0</span>
-      </div>
-      <div class="ench-row">
-        <span class="ench-name" style="color:#ffaa00">💎 Tesouro</span>
-        <span class="ench-lvl" id="e-jackpot-lvl">0</span>
-      </div>
-      <div class="ench-row">
-        <span class="ench-name" style="color:#aaaaff">🧲 Ímã</span>
-        <span class="ench-lvl" id="e-magnet-lvl">0</span>
-      </div>
-      <div class="ench-row">
-        <span class="ench-name" style="color:#88eeee">⚡ Relâmpago</span>
-        <span class="ench-lvl" id="e-lightning-lvl">0</span>
-      </div>
-      <div class="ench-row">
-        <span class="ench-name" style="color:#00ccff">🐬 Golfinho</span>
-        <span class="ench-lvl" id="e-golfinho-lvl">0</span>
-      </div>
+      <button class="ench-toggle-btn" id="ench-toggle-btn" onclick="toggleEnchExtra()">▼ Ver todos</button>
     </div>
 
     <!-- Mine upgrade -->
@@ -1464,6 +1674,7 @@
         <div id="combo-count">×1</div>
         <div id="combo-label">COMBO</div>
       </div>
+      <button class="hud-btn" onclick="toggleMineFullscreen()" id="btn-mine-fullscreen">[ ] Tela Cheia</button>
       <button class="hud-btn" onclick="resetMine()">🔄 Reset Mina</button>
     </div>
     <!-- Mine fill progress -->
@@ -1557,6 +1768,11 @@
     <!-- Leaderboard mini -->
     <div class="panel">
       <div class="panel-title">📊 Leaderboard</div>
+      <div style="display:flex;gap:4px;margin-bottom:6px;flex-wrap:wrap">
+        <button id="lb-mini-tab-coins"  class="hud-btn lb-mini-tab active" style="font-size:10px;padding:3px 7px;border-color:var(--coin);color:var(--coin)" onclick="setLBMiniTab('coins')">🪙 Coins</button>
+        <button id="lb-mini-tab-gems"   class="hud-btn lb-mini-tab" style="font-size:10px;padding:3px 7px" onclick="setLBMiniTab('gems')">💎 Gemas</button>
+        <button id="lb-mini-tab-rank"   class="hud-btn lb-mini-tab" style="font-size:10px;padding:3px 7px" onclick="setLBMiniTab('rank')">⭐ Rank</button>
+      </div>
       <div id="lb-mini"></div>
     </div>
 
@@ -1711,6 +1927,9 @@ const G = {
   // Quests
   quests: null,
 
+  // Enchant toggle — disabled enchants don't fire even if leveled up
+  enchDisabled: {},
+
   // Stats
   sessionStart: Date.now(),
   totalPlayTime: 0,
@@ -1759,7 +1978,7 @@ const ENCH_DATA = [
   { key:'magnet',   name:'🧲 Ímã',       max:30,   unit:'💎 gemas', desc:'Chance de dobrar coins do bloco atual' },
   { key:'lightning',name:'⚡ Relâmpago', max:20,   unit:'💎 gemas', desc:'Chance de quebrar área 5×5' },
   { key:'golfinho', name:'🐬 Golfinho',  max:3000, unit:'💎 gemas', desc:'+200% XP de rank por nível 1000 (máx +600%). Custo total full: 100 Ss' },
-  { key:'nuclear',  name:'☢️ Nuclear',   max:100,  unit:'💠 rubi',  desc:'Quebra TODOS os blocos da mina de uma vez! Custa Rubi. Custo inicial: 15 💠, +0.01 por nível' },
+  { key:'nuclear',  name:'☢️ Nuclear',   max:100,  unit:'💠 rubi',  desc:'Chance de quebrar TODOS os blocos da mina ao minar! Ativa automaticamente por sorte. Custa Rubi. Custo inicial: 15 💠, +0.01 por nível' },
 ];
 
 // Coin and gem bonus per pickaxe tier (multiplier applied in collectBlock)
@@ -2096,26 +2315,43 @@ function renderGrid() {
 // Delegação de eventos — 1 listener no grid em vez de 1 por bloco
 function setupGridEvents() {
   const grid = getGrid();
+
+  // pointerdown: start mining immediately
   grid.addEventListener('pointerdown', (e) => {
     const el = e.target.closest('.block:not(.empty)');
     if (!el) return;
     e.preventDefault();
     G._holdMining = true;
+    grid.setPointerCapture(e.pointerId);
     mineBlock(+el.dataset.idx, el);
   });
-  grid.addEventListener('pointerenter', (e) => {
+
+  // pointermove on the grid (capture released so works across children)
+  grid.addEventListener('pointermove', (e) => {
     if (!G._holdMining) return;
-    const el = e.target.closest('.block:not(.empty)');
-    if (!el) return;
     e.preventDefault();
-    mineBlock(+el.dataset.idx, el);
-  }, true);
+    // elementFromPoint gives us the actual element under the pointer
+    const target = document.elementFromPoint(e.clientX, e.clientY);
+    if (!target) return;
+    const el = target.closest('.block:not(.empty)');
+    if (!el) return;
+    const idx = +el.dataset.idx;
+    if (isNaN(idx)) return;
+    // Throttle: don't mine same block twice in a row
+    if (G._lastMinedIdx === idx) return;
+    G._lastMinedIdx = idx;
+    mineBlock(idx, el);
+  }, { passive: false });
+
+  grid.addEventListener('pointerup',     () => { G._holdMining = false; G._lastMinedIdx = -1; });
+  grid.addEventListener('pointercancel', () => { G._holdMining = false; G._lastMinedIdx = -1; });
 }
 
 // Global hold-mining state
 G._holdMining = false;
-document.addEventListener('pointerup', () => { G._holdMining = false; });
-document.addEventListener('pointercancel', () => { G._holdMining = false; });
+G._lastMinedIdx = -1;
+document.addEventListener('pointerup',     () => { G._holdMining = false; G._lastMinedIdx = -1; });
+document.addEventListener('pointercancel', () => { G._holdMining = false; G._lastMinedIdx = -1; });
 
 // ============================================================
 // MINING
@@ -2144,7 +2380,7 @@ function mineBlock(idx, el) {
   let isExplo = false;
   // Elétrica skin: explode 3x3 com 10% de chance
   const elecBonus = (G.equippedSkin === 'elec' && Math.random() < 0.10);
-  if (elecBonus || (G.explo > 0 && Math.random() < G.explo * 0.001)) {
+  if (elecBonus || (G.explo > 0 && !G.enchDisabled?.explo && Math.random() < G.explo * 0.001)) {
     isExplo = true;
     // Show ring
     const ring = document.createElement('div');
@@ -2162,7 +2398,7 @@ function mineBlock(idx, el) {
   G.totalBlocks++;
 
   // LASER: quebra fileira inteira
-  if (!isExplo && G.laser > 0 && Math.random() < G.laser * 0.00005) {
+  if (!isExplo && G.laser > 0 && !G.enchDisabled?.laser && Math.random() < G.laser * 0.00005) {
     const laserRow = Math.floor(idx / G.gridSize);
     for (let lc = 0; lc < G.gridSize; lc++) {
       const li = laserRow * G.gridSize + lc;
@@ -2175,7 +2411,7 @@ function mineBlock(idx, el) {
   }
 
   // LIGHTNING: quebra área 5×5
-  if (!isExplo && G.lightning > 0 && Math.random() < G.lightning * 0.003) {
+  if (!isExplo && G.lightning > 0 && !G.enchDisabled?.lightning && Math.random() < G.lightning * 0.003) {
     const lrow = Math.floor(idx / G.gridSize), lcol = idx % G.gridSize;
     for (let dr = -2; dr <= 2; dr++) {
       for (let dc = -2; dc <= 2; dc++) {
@@ -2192,7 +2428,7 @@ function mineBlock(idx, el) {
   }
 
   // MAGNET: chance de dobrar os coins coletados do bloco
-  if (G.magnet > 0 && Math.random() < G.magnet * 0.025) {
+  if (G.magnet > 0 && !G.enchDisabled?.magnet && Math.random() < G.magnet * 0.025) {
     const bonus = Math.floor(b.coinBase * (1 + G.fortune * 0.1) * (1 + (G.rank-1)*0.02) * (1 + G.prestiges*0.25));
     G.coins += bonus; G.totalCoins += bonus;
     if (el) {
@@ -2202,7 +2438,7 @@ function mineBlock(idx, el) {
   }
 
   // JACKPOT TESOURO — chance baixa, dá 10 keys
-  if (G.jackpot > 0 && Math.random() < G.jackpot * 0.0005) {
+  if (G.jackpot > 0 && !G.enchDisabled?.jackpot && Math.random() < G.jackpot * 0.00015) {
     G.keys += 10;
     G.totalJackpots++;
     spawnFloat(`💎 TESOURO! +10 🔑`, window.innerWidth/2, window.innerHeight/2, '#f5c842');
@@ -2211,8 +2447,13 @@ function mineBlock(idx, el) {
   }
 
   // FRENZY
-  if (!G.frenzyActive && G.frenzy > 0 && Math.random() < G.frenzy * 0.002) {
+  if (!G.frenzyActive && G.frenzy > 0 && !G.enchDisabled?.frenzy && Math.random() < G.frenzy * 0.002) {
     activateFrenzy();
+  }
+
+  // NUCLEAR — ativa por chance ao minar (sem botão manual)
+  if (G.nuclear > 0 && !G.enchDisabled?.nuclear && Math.random() < G.nuclear * 0.00003) {
+    activateNuclear();
   }
 
   if (isExplo) {
@@ -2332,9 +2573,9 @@ function collectBlock(b, el, idx) {
   }
 
   const vipMult = G.vipActive ? 1.1 : 1;
-  const fortuneMult = 1 + G.fortune * 0.1;
+  const fortuneMult = 1 + (G.enchDisabled?.fortune ? 0 : G.fortune * 0.1);
   // Multiplicador de gemas (multi encantamento)
-  const multiMult = 1 + G.multi * 0.05 + Math.pow(G.multi * 0.03, 1.8);
+  const multiMult = G.enchDisabled?.multi ? 1 : (1 + G.multi * 0.05 + Math.pow(G.multi * 0.03, 1.8));
   // Bônus da picareta (por tier)
   const pickCoinBonus = PICK_COIN_BONUS[G.pickIndex] || 1;
   const pickGemBonus  = PICK_GEM_BONUS[G.pickIndex]  || 1;
@@ -2344,7 +2585,7 @@ function collectBlock(b, el, idx) {
   const rebirthBonus = getRebirthMult();
 
   const coins = Math.floor(b.coinBase * fortuneMult * skinCoinMult * boosterMult * prestigeMult * rankMult * midasCoinMult * pickCoinBonus * vipMult * (G._comboMult||1) * brainrotBonus.coin * rebirthBonus.coin);
-  const gems  = Math.floor(b.gemBase  * multiMult  * skinGemMult * boosterMult * prestigeMult * rankMult * midasGemMult * pickGemBonus * vipMult * (G._comboMult||1) * brainrotBonus.gem * rebirthBonus.gem);
+  const gems  = Math.floor(b.gemBase  * multiMult  * skinGemMult * boosterMult * prestigeMult * rankMult * midasGemMult * pickGemBonus * vipMult * (G._comboMult||1) * brainrotBonus.gem * rebirthBonus.gem * 1.15);
 
   G.coins += coins;
   G.gems  += gems;
@@ -2361,7 +2602,7 @@ function collectBlock(b, el, idx) {
   // (moved to brainrot tick)
 
   // Check Midas trigger — chance reduzida (era 0.002, agora 0.0006)
-  if (!G.midasActive && G.midas > 0 && Math.random() < G.midas * 0.0004) {
+  if (!G.midasActive && G.midas > 0 && !G.enchDisabled?.midas && Math.random() < G.midas * 0.0004) {
     activateMidas();
   }
 
@@ -2374,7 +2615,7 @@ function collectBlock(b, el, idx) {
     }
   }
   // Key chance from Chaveiro enchant (0.25% per level)
-  if (G.keychain > 0 && Math.random() < G.keychain * 0.0025) {
+  if (G.keychain > 0 && !G.enchDisabled?.keychain && Math.random() < G.keychain * 0.0025) {
     G.keys++;
     if (el) {
       const rect = el.getBoundingClientRect();
@@ -2716,13 +2957,15 @@ function renderEnchModal() {
           <button class="btn-buy" ${maxed ? 'disabled' : ''} onclick="upgradeEnch('nuclear');renderEnchModal()" style="border-color:#ff4400;color:#ff6633;background:linear-gradient(135deg,#1a0500,#3a1000)">
             ${maxed ? 'MAX' : '+1 💠'+rubiCost}
           </button>
-          ${lvl > 0 ? `<button class="btn-buy" style="background:linear-gradient(135deg,#1a0000,#3a0000);border-color:#ff4400;color:#ff4400;font-size:11px;padding:4px 8px" onclick="activateNuclear()">☢️ ATIVAR!</button>` : ''}
           <button style="display:${lvl>0?'block':'none'};background:#2a0a0a;border:1px solid #8a3030;color:#e85c5c;font-size:11px;padding:3px 8px;border-radius:4px;cursor:pointer;width:100%" onclick="disenchant('nuclear');renderEnchModal()">🔨</button>
         </div>`;
     } else {
+      const isOff = !!(G.enchDisabled && G.enchDisabled[ed.key]);
       div.innerHTML = `
         <div class="s-info">
-          <div class="s-name">✨ ${ed.name} <span style="color:var(--accent)">[${lvl}/${ed.max}]</span></div>
+          <div class="s-name">✨ ${ed.name} <span style="color:var(--accent)">[${lvl}/${ed.max}]</span>
+            ${lvl > 0 ? `<span style="font-size:10px;padding:1px 5px;border-radius:3px;margin-left:4px;background:${isOff?'#3a0a0a':'#0a2a0a'};color:${isOff?'#e85c5c':'#6edc7a'}">${isOff?'⛔ OFF':'✅ ON'}</span>` : ''}
+          </div>
           <div class="s-desc">${ed.desc}</div>
           <div class="s-cost">${costDisplay}</div>
         </div>
@@ -2731,7 +2974,8 @@ function renderEnchModal() {
             ${maxed ? 'MAX' : '+1'}
           </button>
           ${!maxed ? `<button class="btn-buy" style="background:linear-gradient(135deg,#1a3a3a,#2a6060);border-color:#48c9e8;color:#48c9e8;font-size:10px;padding:3px 6px" onclick="upgradeEnchToMax('${ed.key}')">💎 Gastar Tudo</button>` : ''}
-          <button style="display:${lvl>0?'block':'none'};background:#2a0a0a;border:1px solid #8a3030;color:#e85c5c;font-size:11px;padding:3px 8px;border-radius:4px;cursor:pointer;width:100%" onclick="disenchant('${ed.key}');renderEnchModal()">🔨</button>
+          ${lvl > 0 ? `<button style="background:${isOff?'#0a2a0a':'#2a0a0a'};border:1px solid ${isOff?'#3a8a3a':'#ff8800'};color:${isOff?'#6edc7a':'#ff8800'};font-size:11px;padding:3px 8px;border-radius:4px;cursor:pointer;width:100%" onclick="toggleEnchant('${ed.key}')">${isOff?'✅ Ativar':'⛔ Desativar'}</button>` : ''}
+          <button style="display:${lvl>0?'block':'none'};background:#2a0a0a;border:1px solid #8a3030;color:#e85c5c;font-size:11px;padding:3px 8px;border-radius:4px;cursor:pointer;width:100%" onclick="disenchant('${ed.key}');renderEnchModal()">🔨 -1 nível</button>
         </div>`;
     }
     c.appendChild(div);
@@ -3211,6 +3455,31 @@ function tickAFK() {
 // ============================================================
 // RESET
 // ============================================================
+function toggleMineFullscreen() {
+  const area = document.getElementById('mine-area');
+  const btn  = document.getElementById('btn-mine-fullscreen');
+  const isFS = area.classList.toggle('mine-fullscreen');
+
+  // Toggle body class — CSS handles hiding everything else
+  document.body.classList.toggle('mine-fs', isFS);
+
+  btn.textContent = isFS ? '[ ] Normal' : '[ ] Tela Cheia';
+
+  if (isFS) {
+    area.scrollTop = 0;
+    // ESC key to exit
+    document._mineEscHandler = function(e) {
+      if (e.key === 'Escape') toggleMineFullscreen();
+    };
+    document.addEventListener('keydown', document._mineEscHandler);
+    // Re-render grid to fit new size
+    requestAnimationFrame(() => { renderGrid(); });
+  } else {
+    document.removeEventListener('keydown', document._mineEscHandler);
+    requestAnimationFrame(() => { renderGrid(); });
+  }
+}
+
 function resetMine() {
   generateMine();
   requestAnimationFrame(() => {
@@ -3313,6 +3582,7 @@ function submitScore() {
     gems:      G.totalGems,
     blocks:    G.totalBlocks,
     coins:     G.totalCoins,
+    rubi:      G.totalRubi || 0,
     rank:      G.rank,
     prestiges: G.prestiges,
     ts:        Date.now()
@@ -3326,6 +3596,7 @@ function submitScore() {
       gems:      Math.max(ex.gems,      entry.gems),
       blocks:    Math.max(ex.blocks,    entry.blocks),
       coins:     Math.max(ex.coins,     entry.coins),
+      rubi:      Math.max(ex.rubi||0,   entry.rubi||0),
       rank:      Math.max(ex.rank,      entry.rank),
       prestiges: Math.max(ex.prestiges, entry.prestiges),
     };
@@ -3356,8 +3627,8 @@ function showLBTab(tab) {
 function renderLBContent() {
   const myName = getLBPlayerName();
   const sorted = [...G_LB_DATA].sort((a,b) => b[G_LB_TAB] - a[G_LB_TAB]);
-  const icons = { gems:'💎', blocks:'⛏️', coins:'🪙' };
-  const colors = { gems:'var(--gem)', blocks:'var(--xp)', coins:'var(--coin)' };
+  const icons = { gems:'💎', blocks:'⛏️', coins:'🪙', rubi:'💠' };
+  const colors = { gems:'var(--gem)', blocks:'var(--xp)', coins:'var(--coin)', rubi:'#e84393' };
   const posLabels = ['🥇','🥈','🥉'];
 
   const c = document.getElementById('lb-content');
@@ -3392,28 +3663,73 @@ function renderLBContent() {
   }
 }
 
+let _lbMiniTab = 'coins';
+let _lbMiniCache = null;
+
+function setLBMiniTab(tab) {
+  _lbMiniTab = tab;
+  // Update tab buttons
+  document.querySelectorAll('.lb-mini-tab').forEach(b => {
+    const isActive = b.id === 'lb-mini-tab-' + tab;
+    b.classList.toggle('active', isActive);
+    if (isActive) {
+      const colors = { coins:'var(--coin)', gems:'var(--gem)', rank:'var(--xp)' };
+      b.style.borderColor = colors[tab] || 'var(--accent)';
+      b.style.color = colors[tab] || 'var(--accent)';
+    } else {
+      b.style.borderColor = '';
+      b.style.color = '';
+    }
+  });
+  if (_lbMiniCache) _renderLBMiniRows(_lbMiniCache);
+  else renderLBMini();
+}
+
+function _renderLBMiniRows(rows) {
+  const lb = document.getElementById('lb-mini');
+  if (!lb) return;
+  if (!rows || rows.length === 0) {
+    lb.innerHTML = `<div class="lb-row" style="font-size:11px;color:var(--muted)">Seja o primeiro! 🏆</div>`;
+    return;
+  }
+  const myName = window._fbUser?.displayName || '';
+  const medals = ['🥇','🥈','🥉','4️⃣','5️⃣'];
+
+  // Sort by selected tab
+  const tabField = _lbMiniTab; // 'coins', 'gems', or 'rank'
+  const icons    = { coins:'🪙', gems:'💎', rank:'⭐' };
+  const sorted = [...rows].sort((a, b) => (b[tabField] || 0) - (a[tabField] || 0));
+
+  lb.innerHTML = sorted.slice(0, 5).map((e, i) => {
+    const isMe = e.username === myName;
+    const val  = tabField === 'rank' ? `R${e[tabField] || 1}` : fmt(e[tabField] || 0);
+    return `<div class="lb-row" style="${isMe ? 'color:var(--accent);font-weight:800;' : ''}">
+      <span class="lb-rank">${medals[i]}</span>
+      <span class="lb-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:80px">${e.username}</span>
+      <span class="lb-val">${val}${icons[tabField]}</span>
+    </div>`;
+  }).join('');
+}
+
+let _lbMiniCacheTs = 0;
+const LB_MINI_CACHE_TTL = 5 * 60 * 1000; // 5 minutos
+
 function renderLBMini() {
   const lb = document.getElementById('lb-mini');
   if (!window.loadLeaderboard) {
     lb.innerHTML = `<div class="lb-row" style="font-size:11px;color:var(--muted)">Carregando...</div>`;
     return;
   }
+  // Cache valido: re-renderiza sem bater no Firebase
+  if (_lbMiniCache && (Date.now() - _lbMiniCacheTs) < LB_MINI_CACHE_TTL) {
+    _renderLBMiniRows(_lbMiniCache);
+    return;
+  }
   lb.innerHTML = `<div class="lb-row" style="font-size:11px;color:var(--muted)">⏳ Carregando ranking...</div>`;
   window.loadLeaderboard().then(rows => {
-    if (!rows || rows.length === 0) {
-      lb.innerHTML = `<div class="lb-row" style="font-size:11px;color:var(--muted)">Seja o primeiro! 🏆</div>`;
-      return;
-    }
-    const myName = window._fbUser?.displayName || '';
-    const medals = ['🥇','🥈','🥉','4️⃣','5️⃣'];
-    lb.innerHTML = rows.slice(0,5).map((e, i) => {
-      const isMe = e.username === myName;
-      return `<div class="lb-row" style="${isMe ? 'color:var(--accent);font-weight:800;' : ''}">
-        <span class="lb-rank">${medals[i]}</span>
-        <span class="lb-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:90px">${e.username}</span>
-        <span class="lb-val">${fmt(e.coins)}🪙</span>
-      </div>`;
-    }).join('');
+    _lbMiniCache = rows;
+    _lbMiniCacheTs = Date.now();
+    _renderLBMiniRows(rows);
   });
 }
 
@@ -3584,7 +3900,7 @@ const SAVE_KEYS = [
   'bankBalance','bankLastCollect','lastDailyClaim','dailyStreak',
   'totalPlayTime','totalMidasActivations','totalBossesKilled','totalJackpots','totalEventsTriggered',
   'rubi','totalRubi','rebirthCount','rebirthMult','brainrotInventory','brainrotSlots','rngBoxTimers',
-  'porretes','equippedPorrete','arenaMobs','brainrotPending','specialBoxTimers',
+  'porretes','equippedPorrete','arenaMobs','brainrotPending','specialBoxTimers','enchDisabled',
 ];
 const SAVE_KEY = 'prisonMine_v11_save';
 // Todas as chaves antigas para recuperacao automatica entre versoes
@@ -3663,6 +3979,7 @@ function loadGame() {
     // v18 fields
     if (!G.brainrotPending) G.brainrotPending = 0;
     if (!G.specialBoxTimers) G.specialBoxTimers = {normal:0, rara:0, epica:0, lendaria:0, celestial:0};
+    if (!G.enchDisabled) G.enchDisabled = {};
   } catch(e) { 
     console.warn('Load failed, trying backup:', e);
     try {
@@ -3755,7 +4072,7 @@ setInterval(saveGame, 5000);
 function activateNuclear() {
   if (!G.nuclear || G.nuclear <= 0) { showToast('☢️ Você não tem o encantamento Nuclear!'); return; }
   const rubiCost = Math.ceil(15 + G.nuclear * 0.01);
-  if ((G.rubi||0) < rubiCost) { showToast(`☢️ Nuclear precisa de 💠 ${rubiCost} Rubi!`); return; }
+  if ((G.rubi||0) < rubiCost) { return; } // sem Rubi suficiente — ignora silenciosamente (chance trigger)
   G.rubi -= rubiCost;
   let count = 0;
   G.blocks.forEach((b, i) => {
@@ -4231,22 +4548,18 @@ function disenchant(key) {
   saveGame();
 }
 
+function toggleEnchant(key) {
+  if (!G.enchDisabled) G.enchDisabled = {};
+  G.enchDisabled[key] = !G.enchDisabled[key];
+  const ed = ENCH_DATA.find(e => e.key === key);
+  const state = G.enchDisabled[key] ? '⛔ DESATIVADO' : '✅ ATIVADO';
+  showToast(`${ed ? ed.name : key}: ${state}`);
+  renderEnchModal();
+  saveGame();
+}
 // ============================================================
-// VIP
+// VIP — Single-use Firebase keys (one use per key, then vanishes)
 // ============================================================
-const VIP_KEYS = [
-  'VIP-HYVVS-8YZPX-H6GFM-OQCNU',
-  'VIP-TUVPG-JJXRV-27DCG-WLXON',
-  'VIP-0UWTA-GV3YL-XCPLX-E27XF',
-  'VIP-W58RV-YMZWL-305BD-2OEY5',
-  'VIP-LI4BN-VO7PR-RZEH3-TTG64',
-  'VIP-HM56F-0SVKB-VFPY4-AOMTJ',
-  'VIP-DF9YU-Q0XT1-Y5HFJ-8VN87',
-  'VIP-FFPKQ-20SGG-5NA29-H91FH',
-  'VIP-63EZI-GOOSW-UBEJH-8HQSJ',
-  'VIP-DYKT1-ABJQ9-9549P-ERMB0'
-];
-
 function renderVIPModal() {
   const c = document.getElementById('vip-content');
   if (!c) return;
@@ -4260,30 +4573,65 @@ function renderVIPModal() {
       + '<button class="btn-buy" style="background:#2a0a0a;border-color:#8a3030;color:#e85c5c" onclick="deactivateVIP()">Desativar VIP</button>'
       + '</div>';
   } else {
-    c.innerHTML = '<div style="text-align:center;padding:8px 0 16px">'
+    c.innerHTML = '<div style="text-align:center;padding:8px 0 12px">'
       + '<div style="font-size:36px">🔒</div>'
-      + '<div style="font-size:13px;color:var(--muted);margin:8px 0 16px;line-height:1.6">VIP dá +10% em tudo!<br>Ative com uma key especial.</div>'
+      + '<div style="font-size:13px;color:var(--muted);margin:8px 0 12px;line-height:1.6">VIP dá +10% em tudo!<br>Ative com uma key especial (uso único).</div>'
       + '</div>'
-      + '<div style="font-size:12px;color:var(--muted);margin-bottom:6px">Inserir Key VIP:</div>'
-      + '<div style="display:flex;gap:8px">'
-      + '<input id="vip-input" type="text" placeholder="Cole sua key aqui..." style="flex:1;background:var(--panel2);border:1px solid #a040ff;color:var(--text);padding:8px 10px;border-radius:6px;font-size:13px">'
+      + '<div style="font-size:12px;color:var(--muted);margin-bottom:6px">🔑 Inserir Key VIP (uso único):</div>'
+      + '<div style="display:flex;gap:8px;margin-bottom:12px">'
+      + '<input id="vip-input" type="text" placeholder="KEY-XXXXX-XXXXX-XXXXX-XXXXX" style="flex:1;background:var(--panel2);border:1px solid #a040ff;color:var(--text);padding:8px 10px;border-radius:6px;font-size:12px;font-family:monospace">'
       + '<button class="btn-buy" style="border-color:#a040ff;color:#df80ff;background:linear-gradient(135deg,#2a0050,#4a0090)" onclick="tryActivateVIP()">👑 Ativar</button>'
       + '</div>'
-      + '<div style="font-size:11px;color:var(--muted);margin-top:8px">Keys VIP são fornecidas pelo administrador.</div>';
+      + '<div id="vip-key-status" style="font-size:12px;color:var(--muted);min-height:18px"></div>'
+      + '<div style="font-size:11px;color:var(--muted);margin-top:8px;border-top:1px solid var(--border);padding-top:8px">⚠️ Cada key só funciona uma vez. Após uso, a key é destruída.</div>'
+      + '<hr style="border-color:var(--border);margin:14px 0">'
+      + '<details style="font-size:12px;color:var(--muted)">'
+      + '<summary style="cursor:pointer;color:#ff8800;font-weight:800">🔧 Painel Admin (restrito)</summary>'
+      + '<div style="margin-top:10px;display:flex;flex-direction:column;gap:8px">'
+      + '<input id="adm-user" type="text" placeholder="Usuário admin" style="background:var(--panel2);border:1px solid #8b5000;color:var(--text);padding:7px 10px;border-radius:6px;font-size:12px">'
+      + '<input id="adm-pass" type="password" placeholder="Senha admin" style="background:var(--panel2);border:1px solid #8b5000;color:var(--text);padding:7px 10px;border-radius:6px;font-size:12px">'
+      + '<button class="btn-buy" style="border-color:#ff8800;color:#ffaa44;background:linear-gradient(135deg,#1a0800,#3a1a00)" onclick="adminGenerateKey()">⚡ Gerar Nova Key VIP</button>'
+      + '<div id="adm-key-result" style="font-size:13px;font-family:monospace;font-weight:800;color:#6edc7a;word-break:break-all;min-height:20px;background:var(--panel2);padding:6px 10px;border-radius:6px;border:1px solid var(--border)"></div>'
+      + '</div></details>';
   }
 }
 
-function tryActivateVIP() {
+async function tryActivateVIP() {
   const input = document.getElementById('vip-input');
+  const status = document.getElementById('vip-key-status');
   if (!input) return;
-  if (VIP_KEYS.includes(input.value.trim())) {
+  const key = input.value.trim().toUpperCase();
+  if (status) status.textContent = '⏳ Verificando key...';
+  if (!window.redeemSingleKey) {
+    if (status) status.textContent = '⏳ Firebase carregando, aguarde...';
+    return;
+  }
+  const result = await window.redeemSingleKey(key);
+  if (result.ok) {
     G.vipActive = true;
     saveGame();
     updateVIPUI();
     closeModal('modal-vip');
-    showToast('👑 VIP ATIVADO! +10% em tudo!');
+    showToast('👑 VIP ATIVADO! +10% em tudo! (Key destruída)');
   } else {
-    showToast('❌ Key VIP inválida!');
+    if (status) status.textContent = result.msg;
+    showToast(result.msg);
+  }
+}
+
+async function adminGenerateKey() {
+  const u = (document.getElementById('adm-user')?.value || '').trim();
+  const p = (document.getElementById('adm-pass')?.value || '').trim();
+  const out = document.getElementById('adm-key-result');
+  if (out) out.textContent = '⏳ Gerando...';
+  if (!window.adminCreateKey) { if (out) out.textContent = '❌ Firebase não pronto'; return; }
+  const result = await window.adminCreateKey(u, p, 'vip');
+  if (result.ok) {
+    if (out) out.textContent = result.key;
+    showToast('✅ Key gerada: ' + result.key);
+  } else {
+    if (out) out.textContent = result.msg;
+    showToast(result.msg);
   }
 }
 
@@ -4419,13 +4767,26 @@ function equipBrainrot(id) {
   if (!G.brainrotSlots) G.brainrotSlots = [null,null,null,null,null,null,null,null];
   const inv = G.brainrotInventory.find(x => x.id === id);
   if (!inv || inv.qty <= 0) return;
-  // Find slot to put it in
+
+  // Bloqueia equipar o mesmo brainrot mais vezes do que a quantidade no inventario
+  const timesEquipped = G.brainrotSlots.filter(s => s === id).length;
+  if (timesEquipped >= inv.qty) {
+    showToast('Voce so tem ' + inv.qty + 'x este Brainrot!');
+    return;
+  }
+
   let slot = _selectedBrainrotSlot;
   if (slot === null) {
-    // Find first empty slot
     slot = G.brainrotSlots.findIndex(s => !s);
-    if (slot === -1) slot = 0; // replace slot 0 if all full
+    if (slot === -1) slot = 0;
   }
+
+  // Bloqueia colocar o mesmo brainrot no mesmo slot
+  if (G.brainrotSlots[slot] === id) {
+    showToast('Este slot ja tem este Brainrot!');
+    return;
+  }
+
   G.brainrotSlots[slot] = id;
   renderBrainrotSlots();
   renderBrainrotInv(_selectedBrainrotSlot);
@@ -4489,7 +4850,7 @@ const BRAINROT_SHOP_PRICE = {
   'épico':    150000000,      // 150M
   'lendário': 1000000000,     // 1B
   'mítico':   8000000000,     // 8B
-  'celestial':60000000000,    // 60B
+  'celestial':500000000000,   // 500B (era 60B — aumentado)
 };
 
 const BRAINROT_SHOP_SIZE = 5;         // quantos brainrots aparecem por vez
@@ -4578,6 +4939,13 @@ function buyBrainrotFromShop(bId) {
   const existing = G.brainrotInventory.find(x => x.id === b.id);
   if (existing) existing.qty++;
   else G.brainrotInventory.push({ id: b.id, qty: 1 });
+
+  // Remove este item da loja para não poder comprar de novo na mesma rotação
+  if (G.brainrotShopSlots) {
+    const idx = G.brainrotShopSlots.indexOf(bId);
+    if (idx !== -1) G.brainrotShopSlots.splice(idx, 1);
+  }
+
   const rarityColors = { comum:'#aaa', raro:'#4488ff', 'épico':'#c97cf5', 'lendário':'#f5c842', 'mítico':'#ff6ab0', celestial:'#00ffff' };
   const col = rarityColors[b.rarity] || '#aaa';
   showToast(`🧠 ${b.icon} ${b.name} (${b.rarity.toUpperCase()}) comprado!`);
@@ -4689,7 +5057,7 @@ function doRebirth(tier) {
       <div style="font-size:18px;font-weight:900;color:#ff6ab0;margin-bottom:12px">Confirmar Rebirth ${tier}?</div>
       <div style="font-size:13px;color:#f5c842;margin-bottom:6px">Custo: 🪙 ${fmt(t.costCoins)} + 💠 ${t.costRubi} Rubi</div>
       <div style="font-size:13px;color:#6edc7a;margin-bottom:6px">Bônus: ×${t.coinMult.toFixed(2)} Coins e Gemas PERMANENTE</div>
-      <div style="font-size:12px;color:#e85c5c;margin-bottom:16px">⚠️ Vai resetar: rank, coins e picareta</div>
+      <div style="font-size:12px;color:#e85c5c;margin-bottom:16px">⚠️ Vai resetar: rank, coins, picareta e todos os Brainrots</div>
       <div style="display:flex;gap:10px;justify-content:center">
         <button onclick="confirmRebirth()" style="flex:1;padding:12px;border-radius:8px;font-weight:900;font-size:14px;cursor:pointer;
           background:linear-gradient(135deg,#3a0030,#8a0060);border:2px solid #e84393;color:#ff6ab0;">
@@ -4717,10 +5085,15 @@ function confirmRebirth() {
   G.rank = 1; G.xp = 0;
   G.coins = 0;
   G.pickIndex = 0; G.pickHP = 0;
+  // Rebirth da Gaiola: reseta apenas brainrots do inventário
+  G.brainrotInventory = [];
+  G.brainrotSlots = [null,null,null,null,null,null,null,null];
+  G.brainrotPending = 0;
   _rebirthPendingTier = 0;
   spawnFloat('♻️ REBIRTH ' + tier + '!', window.innerWidth/2, window.innerHeight/2, '#ff6ab0');
-  showToast('♻️ Rebirth ' + tier + ' completo! ×' + t.coinMult.toFixed(2) + ' permanente!');
+  showToast('♻️ Rebirth ' + tier + ' completo! ×' + t.coinMult.toFixed(2) + ' permanente! (Brainrots resetados)');
   updateHUD(); updateRankUI(); updatePickUI();
+  renderBrainrotSlots();
   renderRebirthModal();
   saveGame();
 }
@@ -4831,23 +5204,23 @@ function equipPorrete(tier) {
 // Tier 0 = sem porrete, Tier 1-8 = Porrete 1-8
 const ARENA_BOSS_TIERS = [
   // tier 0 — sem porrete
-  { name:'Rato da Prisão',      icon:'🐀', maxHp:10,    rubiDrop:3,    xpDrop:2,   respawnSecs:5,   color:'#888' },
+  { name:'Rato da Prisão',      icon:'🐀', maxHp:4,     rubiDrop:3,    xpDrop:2,   respawnSecs:5,   color:'#888' },
   // tier 1 — Porrete 1
-  { name:'Guarda Novato',       icon:'💂', maxHp:30,    rubiDrop:8,    xpDrop:5,   respawnSecs:12,  color:'#4488ff' },
+  { name:'Guarda Novato',       icon:'💂', maxHp:12,    rubiDrop:8,    xpDrop:5,   respawnSecs:12,  color:'#4488ff' },
   // tier 2 — Porrete 2
-  { name:'Cão Bravo',           icon:'🐕', maxHp:100,   rubiDrop:20,   xpDrop:15,  respawnSecs:25,  color:'#88cc44' },
+  { name:'Cão Bravo',           icon:'🐕', maxHp:40,    rubiDrop:20,   xpDrop:15,  respawnSecs:25,  color:'#88cc44' },
   // tier 3 — Porrete 3
-  { name:'Preso Boxeador',      icon:'🥊', maxHp:350,   rubiDrop:50,   xpDrop:40,  respawnSecs:45,  color:'#c97cf5' },
+  { name:'Preso Boxeador',      icon:'🥊', maxHp:140,   rubiDrop:50,   xpDrop:40,  respawnSecs:45,  color:'#c97cf5' },
   // tier 4 — Porrete 4
-  { name:'Chefe do Bloco',      icon:'👹', maxHp:1200,  rubiDrop:120,  xpDrop:100, respawnSecs:90,  color:'#f5c842' },
+  { name:'Chefe do Bloco',      icon:'👹', maxHp:480,   rubiDrop:120,  xpDrop:100, respawnSecs:90,  color:'#f5c842' },
   // tier 5 — Porrete 5
-  { name:'Diretor Corrupto',    icon:'😈', maxHp:5000,  rubiDrop:350,  xpDrop:250, respawnSecs:180, color:'#ff6ab0' },
+  { name:'Diretor Corrupto',    icon:'😈', maxHp:2000,  rubiDrop:350,  xpDrop:250, respawnSecs:180, color:'#ff6ab0' },
   // tier 6 — Porrete 6
-  { name:'Carrasco da Gaiola',  icon:'🪖', maxHp:20000, rubiDrop:900,  xpDrop:600, respawnSecs:300, color:'#ff4444' },
+  { name:'Carrasco da Gaiola',  icon:'🪖', maxHp:8000,  rubiDrop:900,  xpDrop:600, respawnSecs:300, color:'#ff4444' },
   // tier 7 — Porrete 7
-  { name:'Titã do Presídio',    icon:'👾', maxHp:80000, rubiDrop:2500, xpDrop:1500,respawnSecs:480, color:'#ff8800' },
+  { name:'Titã do Presídio',    icon:'👾', maxHp:32000, rubiDrop:2500, xpDrop:1500,respawnSecs:480, color:'#ff8800' },
   // tier 8 — Porrete 8
-  { name:'O Ceifador',          icon:'💀', maxHp:350000,rubiDrop:8000, xpDrop:5000,respawnSecs:720, color:'#cc00ff' },
+  { name:'O Ceifador',          icon:'💀', maxHp:140000,rubiDrop:8000, xpDrop:5000,respawnSecs:720, color:'#cc00ff' },
 ];
 
 const ARENA_COUNT_BASE = 9; // instâncias base por boss
@@ -5041,6 +5414,70 @@ function switchTab(tab) {
   }
 }
 
+// ── ENCHANTMENT COLLAPSE ──────────────────────────────────────────────────
+function toggleEnchExtra() {
+  const extra = document.getElementById('ench-extra');
+  const btn   = document.getElementById('ench-toggle-btn');
+  const open  = extra.classList.toggle('open');
+  btn.textContent = open ? '▲ Recolher' : '▼ Ver todos';
+}
+
+// ── CHAT GLOBAL ───────────────────────────────────────────────────────────
+let _chatCollapsed = false;
+let _chatLastSent = 0;
+
+function toggleChat() {
+  _chatCollapsed = !_chatCollapsed;
+  const body = document.getElementById('chat-body');
+  const icon = document.getElementById('chat-toggle-icon');
+  body.classList.toggle('collapsed', _chatCollapsed);
+  icon.textContent = _chatCollapsed ? '▼' : '▲';
+}
+
+function sendChat() {
+  const input = document.getElementById('chat-input');
+  const text  = (input.value || '').trim();
+  if (!text) return;
+  if (!window._fbUser) { showToast('Faca login para usar o chat!'); return; }
+  const now = Date.now();
+  const elapsed = (now - _chatLastSent) / 1000;
+  if (elapsed < 5) {
+    showToast(`⏳ Aguarde ${Math.ceil(5 - elapsed)}s para enviar outra mensagem!`);
+    return;
+  }
+  _chatLastSent = now;
+  input.value = '';
+  if (window.sendChatMessage) window.sendChatMessage(text);
+}
+
+window._renderChat = function(msgs) {
+  const el = document.getElementById('chat-messages');
+  if (!el) return;
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  el.innerHTML = msgs.length === 0
+    ? '<div class="chat-msg chat-msg-system">Nenhuma mensagem ainda. Seja o primeiro!</div>'
+    : msgs.map(m => {
+        const name = (m.name || 'Anonimo').slice(0, 20);
+        const text = (m.text || '').slice(0, 120)
+          .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        const isMe = window._fbUser && m.uid === window._fbUser.uid;
+        return `<div class="chat-msg" style="${isMe ? 'opacity:0.8' : ''}">
+          <span class="chat-msg-name" style="${isMe ? 'color:#6edc7a' : ''}">${name}:</span>
+          <span class="chat-msg-text">${text}</span>
+        </div>`;
+      }).join('');
+  if (atBottom) el.scrollTop = el.scrollHeight;
+};
+
+// Inicia o chat quando o Firebase estiver pronto
+(function waitForChat() {
+  if (window.initChat) {
+    window.initChat();
+  } else {
+    setTimeout(waitForChat, 300);
+  }
+})();
+
 init();
 // Safety net: if something throws after init starts, still try to show the game
 window.addEventListener('error', (e) => {
@@ -5079,7 +5516,7 @@ window.addEventListener('error', (e) => {
 
     el = document.getElementById('hud-cloud-save');
     if (el) el.addEventListener('click', function() {
-      if (window.saveToCloud) window.saveToCloud().then(function() { showToast('☁️ Salvo na nuvem!'); });
+      if (window.saveToCloud) window.saveToCloud(true).then(function() { showToast('☁️ Salvo na nuvem!'); });
     });
 
     el = document.getElementById('hud-logout');
@@ -5091,5 +5528,26 @@ window.addEventListener('error', (e) => {
 })();
 
 </script>
+<!-- FULLSCREEN MINIMIZE BUTTON (only visible in fullscreen) -->
+<button id="mine-fs-btn" onclick="toggleMineFullscreen()">✕ Minimizar</button>
+
+<!-- CHAT GLOBAL -->
+<div id="chat-widget">
+  <div id="chat-header" onclick="toggleChat()">
+    <span id="chat-header-title">💬 Chat Global</span>
+    <span id="chat-toggle-icon">▲</span>
+  </div>
+  <div id="chat-body">
+    <div id="chat-messages">
+      <div class="chat-msg chat-msg-system">Conectando ao chat...</div>
+    </div>
+    <div id="chat-input-row">
+      <input id="chat-input" type="text" placeholder="Mensagem..." maxlength="120"
+        onkeydown="if(event.key==='Enter') sendChat()">
+      <button id="chat-send-btn" onclick="sendChat()">Enviar</button>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>
