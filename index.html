@@ -29,15 +29,32 @@
   const db   = getFirestore(app);
 
   // ── Auth state ──────────────────────────────────────────────────────────
-  onAuthStateChanged(auth, (user) => {
+  let _sessionInterval = null;
+  onAuthStateChanged(auth, async (user) => {
     if (user) {
       window._fbUser = user;
       document.getElementById('auth-screen').style.display = 'none';
       document.getElementById('app').style.display = 'grid';
       document.getElementById('hud-username').textContent = user.displayName || user.email;
       loadCloudSave(user.uid);
+
+      // Registrar sessão ativa (heartbeat a cada 15s)
+      const emailHash = (user.email || user.uid).toLowerCase().replace(/[^a-z0-9]/g, '_');
+      const deviceId  = localStorage.getItem('prisonMine_deviceId') || ('dev_' + Math.random().toString(36).slice(2));
+      localStorage.setItem('prisonMine_deviceId', deviceId);
+      const writeSession = async () => {
+        try {
+          await setDoc(doc(db, 'sessions', emailHash), {
+            uid: user.uid, deviceId, lastSeen: serverTimestamp()
+          });
+        } catch(e) {}
+      };
+      await writeSession();
+      if (_sessionInterval) clearInterval(_sessionInterval);
+      _sessionInterval = setInterval(writeSession, 15000);
     } else {
       window._fbUser = null;
+      if (_sessionInterval) { clearInterval(_sessionInterval); _sessionInterval = null; }
       document.getElementById('auth-screen').style.display = 'flex';
       document.getElementById('app').style.display = 'none';
     }
@@ -92,6 +109,7 @@
         coins:     G.coins || 0,
         gems:      G.gems  || 0,
         rank:      G.rank  || 1,
+        blocks:    G.totalBlocks || 0,
         updatedAt: serverTimestamp()
       });
     } catch(e) { console.error('Save error:', e); }
@@ -114,7 +132,8 @@
         username: d.data().username,
         coins:    d.data().coins   || 0,
         gems:     d.data().gems    || 0,
-        rank:     d.data().rank    || 1
+        rank:     d.data().rank    || 1,
+        blocks:   d.data().blocks  || 0
       }));
       _lbFirebaseCache = rows;
       _lbFirebaseCacheTs = Date.now();
@@ -157,7 +176,30 @@
     if (!email || !pass) { err.textContent = 'Preencha email e senha!'; return; }
     try {
       err.textContent = '';
-      document.getElementById('auth-btn-login').textContent = 'Entrando...';
+      document.getElementById('auth-btn-login').textContent = 'Verificando...';
+
+      // Verificar se já existe uma sessão ativa para esta conta
+      // Busca o save para checar se há um campo de sessão ativo recente
+      const emailHash = email.toLowerCase().trim().replace(/[^a-z0-9]/g, '_');
+      try {
+        const sessionRef = doc(db, 'sessions', emailHash);
+        const sessionSnap = await getDoc(sessionRef);
+        if (sessionSnap.exists()) {
+          const sessionData = sessionSnap.data();
+          const sessionAge = Date.now() - (sessionData.lastSeen?.toMillis?.() || 0);
+          // Se a sessão foi vista nos últimos 30 segundos e NÃO é este dispositivo
+          const thisDevice = localStorage.getItem('prisonMine_deviceId') || '';
+          if (sessionAge < 30000 && sessionData.deviceId && sessionData.deviceId !== thisDevice) {
+            err.textContent = '⚠️ Esta conta já está logada em outro dispositivo!';
+            document.getElementById('auth-btn-login').textContent = '⚒️ Entrar';
+            return;
+          }
+        }
+      } catch(sessionErr) {
+        // Se falhar ao checar sessão, continua o login normalmente
+        console.log('Session check skipped:', sessionErr.message);
+      }
+
       await signInWithEmailAndPassword(auth, email, pass);
     } catch(e) {
       const msgs = {
@@ -167,7 +209,7 @@
         'auth/invalid-email':      'Email inválido!',
       };
       err.textContent = msgs[e.code] || 'Erro: ' + e.message;
-      document.getElementById('auth-btn-login').textContent = 'Entrar';
+      document.getElementById('auth-btn-login').textContent = '⚒️ Entrar';
     }
   };
 
@@ -521,6 +563,10 @@
   }
   body.mine-fs #mine-area #mine-grid {
     width: 100%; height: 100%;
+  }
+  /* Hide the in-header close/normal button when fullscreen — only the fixed Minimizar button remains */
+  body.mine-fs #btn-mine-fullscreen {
+    display: none !important;
   }
   /* Fullscreen minimize button */
   #mine-fs-btn {
@@ -1280,7 +1326,7 @@
 
 
 <div id="vip-bar">
-  <div id="vip-bar-label">👑 VIP ATIVO — +10% EM TUDO 👑</div>
+  <div id="vip-bar-label">👑 VIP ATIVO — <span id="vip-bar-bonus">+10%</span> EM TUDO 👑</div>
   <button onclick="openModal('modal-vip')" style="background:none;border:1px solid #a040ff;color:#df80ff;font-size:11px;padding:2px 8px;border-radius:4px;cursor:pointer;">⚙️</button>
 </div>
 
@@ -1772,6 +1818,7 @@
         <button id="lb-mini-tab-coins"  class="hud-btn lb-mini-tab active" style="font-size:10px;padding:3px 7px;border-color:var(--coin);color:var(--coin)" onclick="setLBMiniTab('coins')">🪙 Coins</button>
         <button id="lb-mini-tab-gems"   class="hud-btn lb-mini-tab" style="font-size:10px;padding:3px 7px" onclick="setLBMiniTab('gems')">💎 Gemas</button>
         <button id="lb-mini-tab-rank"   class="hud-btn lb-mini-tab" style="font-size:10px;padding:3px 7px" onclick="setLBMiniTab('rank')">⭐ Rank</button>
+        <button id="lb-mini-tab-blocks" class="hud-btn lb-mini-tab" style="font-size:10px;padding:3px 7px" onclick="setLBMiniTab('blocks')">⛏️ Blocos</button>
       </div>
       <div id="lb-mini"></div>
     </div>
@@ -1853,6 +1900,7 @@ const G = {
 
   // VIP
   vipActive: false,
+  vipTier: 0, // 0=sem VIP, 1=+10%, 2=+15%, 3=+20%, 4=+25%
 
   // Rubi
   rubi: 0,
@@ -1978,7 +2026,7 @@ const ENCH_DATA = [
   { key:'magnet',   name:'🧲 Ímã',       max:30,   unit:'💎 gemas', desc:'Chance de dobrar coins do bloco atual' },
   { key:'lightning',name:'⚡ Relâmpago', max:20,   unit:'💎 gemas', desc:'Chance de quebrar área 5×5' },
   { key:'golfinho', name:'🐬 Golfinho',  max:3000, unit:'💎 gemas', desc:'+200% XP de rank por nível 1000 (máx +600%). Custo total full: 100 Ss' },
-  { key:'nuclear',  name:'☢️ Nuclear',   max:100,  unit:'💠 rubi',  desc:'Chance de quebrar TODOS os blocos da mina ao minar! Ativa automaticamente por sorte. Custa Rubi. Custo inicial: 15 💠, +0.01 por nível' },
+  { key:'nuclear',  name:'☢️ Nuclear',   max:100,  unit:'💠 rubi',  desc:'Chance de quebrar TODOS os blocos da mina ao minar! Ativa automaticamente por sorte. Custa Rubi. Custo inicial: 80 💠, +5 por nível' },
 ];
 
 // Coin and gem bonus per pickaxe tier (multiplier applied in collectBlock)
@@ -2151,16 +2199,16 @@ function rollBrainrotFromWeights(weights) {
 // REBIRTH DATA
 // ============================================================
 const REBIRTH_TIERS = [
-  { n:1, coinMult:1.10, gemMult:1.10, costCoins:1e9,   costRubi:200   },
-  { n:2, coinMult:1.25, gemMult:1.25, costCoins:5e9,   costRubi:600   },
-  { n:3, coinMult:1.45, gemMult:1.45, costCoins:20e9,  costRubi:1400  },
-  { n:4, coinMult:1.70, gemMult:1.70, costCoins:100e9, costRubi:2800  },
-  { n:5, coinMult:2.00, gemMult:2.00, costCoins:500e9, costRubi:5000  },
-  { n:6, coinMult:2.40, gemMult:2.40, costCoins:2e12,  costRubi:9000  },
-  { n:7, coinMult:3.00, gemMult:3.00, costCoins:1e13,  costRubi:16000 },
-  { n:8, coinMult:4.00, gemMult:4.00, costCoins:5e13,  costRubi:28000 },
-  { n:9, coinMult:5.50, gemMult:5.50, costCoins:2e14,  costRubi:48000 },
-  { n:10,coinMult:7.50, gemMult:7.50, costCoins:1e15,  costRubi:80000 },
+  { n:1, coinMult:1.10, gemMult:1.10, costCoins:1e9,   costRubi:500    },
+  { n:2, coinMult:1.25, gemMult:1.25, costCoins:5e9,   costRubi:1500   },
+  { n:3, coinMult:1.45, gemMult:1.45, costCoins:20e9,  costRubi:3500   },
+  { n:4, coinMult:1.70, gemMult:1.70, costCoins:100e9, costRubi:7000   },
+  { n:5, coinMult:2.00, gemMult:2.00, costCoins:500e9, costRubi:13000  },
+  { n:6, coinMult:2.40, gemMult:2.40, costCoins:2e12,  costRubi:23000  },
+  { n:7, coinMult:3.00, gemMult:3.00, costCoins:1e13,  costRubi:40000  },
+  { n:8, coinMult:4.00, gemMult:4.00, costCoins:5e13,  costRubi:70000  },
+  { n:9, coinMult:5.50, gemMult:5.50, costCoins:2e14,  costRubi:120000 },
+  { n:10,coinMult:7.50, gemMult:7.50, costCoins:1e15,  costRubi:200000 },
 ];
 
 function getRebirthMult() {
@@ -2316,42 +2364,82 @@ function renderGrid() {
 function setupGridEvents() {
   const grid = getGrid();
 
-  // pointerdown: start mining immediately
-  grid.addEventListener('pointerdown', (e) => {
-    const el = e.target.closest('.block:not(.empty)');
+  // Remove listeners anteriores clonando o elemento
+  const newGrid = grid.cloneNode(true);
+  grid.parentNode.replaceChild(newGrid, grid);
+  _gridEl = newGrid;
+
+  const g = _gridEl;
+
+  // Estado do drag — armazenado em G para sobreviver ao reset do grid
+  if (!G._dragState) G._dragState = { dragging: false, lastIdx: -1, lastMineTime: 0, pointerId: null };
+  const ds = G._dragState;
+
+  function getBlockEl(x, y) {
+    const el = document.elementFromPoint(x, y);
+    if (!el) return null;
+    if (el.classList.contains('block') && !el.classList.contains('empty')) return el;
+    const parent = el.closest('.block:not(.empty)');
+    return parent || null;
+  }
+
+  // Se o mouse ainda estava pressionado antes do reset, retoma o drag
+  if (G._holdMining && ds.dragging && ds.pointerId !== null) {
+    try { g.setPointerCapture(ds.pointerId); } catch(e) {}
+  }
+
+  g.addEventListener('pointerdown', (e) => {
+    const el = getBlockEl(e.clientX, e.clientY);
     if (!el) return;
     e.preventDefault();
+    ds.dragging = true;
+    ds.lastIdx = -1;
+    ds.pointerId = e.pointerId;
     G._holdMining = true;
-    grid.setPointerCapture(e.pointerId);
-    mineBlock(+el.dataset.idx, el);
-  });
+    g.setPointerCapture(e.pointerId);
+    const idx = +el.dataset.idx;
+    if (!isNaN(idx)) {
+      ds.lastIdx = idx;
+      mineBlock(idx, el);
+    }
+  }, { passive: false });
 
-  // pointermove on the grid (capture released so works across children)
-  grid.addEventListener('pointermove', (e) => {
-    if (!G._holdMining) return;
+  g.addEventListener('pointermove', (e) => {
+    if (!ds.dragging || !G._holdMining) return;
     e.preventDefault();
-    // elementFromPoint gives us the actual element under the pointer
-    const target = document.elementFromPoint(e.clientX, e.clientY);
-    if (!target) return;
-    const el = target.closest('.block:not(.empty)');
+    const now = Date.now();
+    if (now - ds.lastMineTime < 30) return; // throttle 30ms
+    const el = getBlockEl(e.clientX, e.clientY);
     if (!el) return;
     const idx = +el.dataset.idx;
-    if (isNaN(idx)) return;
-    // Throttle: don't mine same block twice in a row
-    if (G._lastMinedIdx === idx) return;
-    G._lastMinedIdx = idx;
+    if (isNaN(idx) || idx === ds.lastIdx) return;
+    if (!G.blocks[idx]) return; // bloco já vazio
+    ds.lastIdx = idx;
+    ds.lastMineTime = now;
     mineBlock(idx, el);
   }, { passive: false });
 
-  grid.addEventListener('pointerup',     () => { G._holdMining = false; G._lastMinedIdx = -1; });
-  grid.addEventListener('pointercancel', () => { G._holdMining = false; G._lastMinedIdx = -1; });
+  function stopDrag() {
+    ds.dragging = false;
+    ds.lastIdx = -1;
+    ds.pointerId = null;
+    G._holdMining = false;
+    G._lastMinedIdx = -1;
+  }
+
+  g.addEventListener('pointerup',     stopDrag);
+  g.addEventListener('pointercancel', stopDrag);
+  g.addEventListener('pointerleave',  (e) => {
+    // Só para se sair do grid completamente (não entre filhos)
+    if (!e.relatedTarget || !g.contains(e.relatedTarget)) stopDrag();
+  });
 }
 
 // Global hold-mining state
 G._holdMining = false;
 G._lastMinedIdx = -1;
-document.addEventListener('pointerup',     () => { G._holdMining = false; G._lastMinedIdx = -1; });
-document.addEventListener('pointercancel', () => { G._holdMining = false; G._lastMinedIdx = -1; });
+document.addEventListener('pointerup',     () => { G._holdMining = false; G._lastMinedIdx = -1; if (G._dragState) { G._dragState.dragging = false; G._dragState.lastIdx = -1; G._dragState.pointerId = null; } });
+document.addEventListener('pointercancel', () => { G._holdMining = false; G._lastMinedIdx = -1; if (G._dragState) { G._dragState.dragging = false; G._dragState.lastIdx = -1; G._dragState.pointerId = null; } });
 
 // ============================================================
 // MINING
@@ -2452,7 +2540,7 @@ function mineBlock(idx, el) {
   }
 
   // NUCLEAR — ativa por chance ao minar (sem botão manual)
-  if (G.nuclear > 0 && !G.enchDisabled?.nuclear && Math.random() < G.nuclear * 0.00003) {
+  if (G.nuclear > 0 && !G.enchDisabled?.nuclear && Math.random() < G.nuclear * 0.001) {
     activateNuclear();
   }
 
@@ -2509,7 +2597,7 @@ function mineBlock(idx, el) {
   const pctMined = (total - remaining) / total;
   updateMineProgress(remaining, total);
   if (remaining <= 0 || pctMined >= 0.40) {
-    requestAnimationFrame(() => { generateMine(); renderGrid(); updateMineProgress(total, total); });
+    requestAnimationFrame(() => { generateMine(); renderGrid(); setupGridEvents(); updateMineProgress(total, total); });
   }
 
   // XP
@@ -2572,7 +2660,8 @@ function collectBlock(b, el, idx) {
     midasGemMult = 1.2 + G.midas * 0.03;
   }
 
-  const vipMult = G.vipActive ? 1.1 : 1;
+  const _vipBonuses = [1, 1.1, 1.15, 1.20, 1.25];
+  const vipMult = G.vipActive ? (_vipBonuses[G.vipTier] || 1.1) : 1;
   const fortuneMult = 1 + (G.enchDisabled?.fortune ? 0 : G.fortune * 0.1);
   // Multiplicador de gemas (multi encantamento)
   const multiMult = G.enchDisabled?.multi ? 1 : (1 + G.multi * 0.05 + Math.pow(G.multi * 0.03, 1.8));
@@ -2665,7 +2754,7 @@ function getBrainrotCoinIncome() {
   let total = 0;
   const prestigeMult = 1 + G.prestiges * 0.25;
   const rankMult = 1 + (G.rank - 1) * 0.02;
-  const vipM = G.vipActive ? 1.1 : 1;
+  const _vipB = [1, 1.1, 1.15, 1.20, 1.25]; const vipM = G.vipActive ? (_vipB[G.vipTier] || 1.1) : 1;
   const boosterMult = G.boosterActive ? 1.4 : 1;
   const rebirthM = getRebirthMult().coin;
   const BRAINROT_COIN_BASE = { comum: 4000, raro: 20000, 'épico': 120000, 'lendário': 800000, 'mítico': 6000000, celestial: 45000000 };
@@ -2745,7 +2834,7 @@ function updatePickUI() {
   document.getElementById('pick-hp-fill').style.width = pct + '%';
   document.getElementById('pick-name').textContent = G.picks[G.pickIndex];
   document.getElementById('pick-icon').textContent = G.pickIcons[G.pickIndex];
-  document.getElementById('pick-hp-text').textContent = `${G.pickHP}/${G.pickMaxHP[G.pickIndex]}`;
+  document.getElementById('pick-hp-text').textContent = `${fmt(G.pickHP)}/${fmt(G.pickMaxHP[G.pickIndex])}`;
   const cb = (PICK_COIN_BONUS[G.pickIndex] || 1).toFixed(1);
   const gb = (PICK_GEM_BONUS[G.pickIndex]  || 1).toFixed(1);
   document.getElementById('pick-coin-text').textContent = `×${cb}`;
@@ -2788,7 +2877,7 @@ function defeatBoss() {
 function updateBossUI() {
   const pct = G.bossHP / G.bossMaxHP * 100;
   document.getElementById('boss-hp-fill').style.width = pct + '%';
-  document.getElementById('boss-hp-txt').textContent = `${Math.max(0,G.bossHP)}/${G.bossMaxHP}`;
+  document.getElementById('boss-hp-txt').textContent = `${fmt(Math.max(0,G.bossHP))}/${fmt(G.bossMaxHP)}`;
 }
 
 // ============================================================
@@ -2814,7 +2903,8 @@ function gainXP(amount) {
     updateRankUI();
     if (newTier > oldTier) {
       generateMine(); renderGrid();
-      showToast(`🌟 Rank ${G.rank}: Nova camada desbloqueada! Blocos mais ricos!`);
+      const tierNames = ['Pedra/Carvão','Teal/Verde','Azul Profundo','Fogo/Vermelho','Roxo/Void','Ouro/Âmbar','Verde Tóxico','Espacial Cósmico'];
+      showToast(`⛏️ Rank ${G.rank}: Mina evoluiu! Novos minérios — ${tierNames[newTier] || 'Nível '+newTier}!`);
     }
   }
   updateRankUI();
@@ -2825,7 +2915,7 @@ function updateRankUI() {
   document.getElementById('rank-num').textContent = G.rank;
   document.getElementById('rank-name').textContent = getRankName(G.rank);
   document.getElementById('xp-fill').style.width = pct + '%';
-  document.getElementById('xp-text').textContent = `${G.xp} / ${needed} XP`;
+  document.getElementById('xp-text').textContent = `${fmt(G.xp)} / ${fmt(needed)} XP`;
   document.getElementById('hud-rank').textContent = `R${G.rank}`;
 }
 
@@ -2838,7 +2928,7 @@ function upgradeEnch(key) {
   if (G[key] >= ed.max) { showToast('Já está no nível máximo!'); return; }
   // Nuclear uses rubi instead of gems
   if (key === 'nuclear') {
-    const rubiCost = Math.ceil(15 + G[key] * 0.01);
+    const rubiCost = Math.ceil(80 + G[key] * 5);
     if ((G.rubi||0) < rubiCost) { showToast(`Precisa de 💠 ${rubiCost} Rubi!`); return; }
     G.rubi -= rubiCost;
     G[key]++;
@@ -2935,8 +3025,8 @@ function renderEnchModal() {
     const isNuclear = ed.key === 'nuclear';
     let costDisplay, nextCostDisplay;
     if (isNuclear) {
-      const rubiCost = Math.ceil(15 + lvl * 0.01);
-      costDisplay = maxed ? '<span style="color:var(--xp)">MÁXIMO</span>' : `💠 ${rubiCost} Rubi <span style="color:var(--muted);font-size:10px">(próx: ${Math.ceil(15+(lvl+1)*0.01)} Rubi)</span>`;
+      const rubiCost = Math.ceil(80 + lvl * 5);
+      costDisplay = maxed ? '<span style="color:var(--xp)">MÁXIMO</span>' : `💠 ${rubiCost} Rubi <span style="color:var(--muted);font-size:10px">(próx: ${Math.ceil(80+(lvl+1)*5)} Rubi)</span>`;
     } else {
       const cost = enchCost(ed.key, lvl);
       const costToMax = !maxed ? enchCostToMax(ed.key) : 0;
@@ -2946,7 +3036,7 @@ function renderEnchModal() {
     const div = document.createElement('div');
     div.className = 'shop-row';
     if (isNuclear) {
-      const rubiCost = Math.ceil(15 + lvl * 0.01);
+      const rubiCost = Math.ceil(80 + lvl * 5);
       div.innerHTML = `
         <div class="s-info">
           <div class="s-name">☢️ ${ed.name} <span style="color:var(--accent)">[${lvl}/${ed.max}]</span></div>
@@ -3132,7 +3222,7 @@ function rollKey() {
 }
 
 function openKeys() {
-  document.getElementById('keys-count-btn').textContent = G.keys;
+  document.getElementById('keys-count-btn').textContent = fmt(G.keys);
   document.getElementById('key-all-result').style.display = 'none';
   document.getElementById('key-result').innerHTML = G.keys > 0
     ? '<div style="color:var(--muted);text-align:center;font-size:13px">Escolha uma opção acima.</div>'
@@ -3163,7 +3253,7 @@ function openOneKey() {
       ${reward.booster ? '<br>⚡ +1 Booster Lendário!' : ''}
       ${reward.porrete1 ? '<br>🪵 +1 Porrete 1!' : ''}
     </div>`;
-  document.getElementById('keys-count-btn').textContent = G.keys;
+  document.getElementById('keys-count-btn').textContent = fmt(G.keys);
   updateHUD(); autoSave();
 }
 
@@ -3200,7 +3290,7 @@ function openAllKeys() {
     <div style="margin-top:10px;text-align:center;font-size:14px;">
       🪙 +${fmt(totalCoins)}&nbsp;&nbsp;💎 +${fmt(totalGems)}${totalBoosters > 0 ? '&nbsp;&nbsp;⚡ +'+totalBoosters : ''}${totalPorretes > 0 ? '&nbsp;&nbsp;🪵 +'+totalPorretes+' Porrete 1' : ''}
     </div>`;
-  document.getElementById('keys-count-btn').textContent = 0;
+  document.getElementById('keys-count-btn').textContent = fmt(0);
   updateHUD(); autoSave();
 }
 
@@ -3315,7 +3405,11 @@ function updateMineUI() {
   const tier = Math.min(7, Math.floor((G.rank - 1) / 20));
   const TIER_NAMES = ['🪨 Pedra Cinza','🌿 Floresta Subterrânea','🌊 Abismo Azul','🔥 Núcleo de Fogo','🔮 Vazio Púrpura','✨ Ruínas Douradas','☠️ Neon Tóxico','🌌 Espaço Cósmico'];
   const mineThemeEl = document.getElementById('mine-theme-txt');
-  if (mineThemeEl) mineThemeEl.textContent = TIER_NAMES[tier] || TIER_NAMES[0];
+  if (mineThemeEl) {
+    const nextTierRank = (tier + 1) * 20 + 1;
+    const nextInfo = tier < 7 ? ` → próx. Rank ${nextTierRank}` : ' (MAX)';
+    mineThemeEl.textContent = (TIER_NAMES[tier] || TIER_NAMES[0]) + nextInfo;
+  }
 }
 
 // ============================================================
@@ -3444,6 +3538,83 @@ function tickAFK() {
     }
     checkBoss();
     gainXP(1);
+
+    // AFK: XP de picareta por bloco minado
+    G.pickHP = (G.pickHP || 0) + 1;
+    if (G.pickHP >= G.pickMaxHP[G.pickIndex]) {
+      upgradePickaxe();
+    } else {
+      updatePickUI();
+    }
+
+    // AFK: enchants com as mesmas chances da mineração normal
+    // EXPLOSÃO
+    if (G.explo > 0 && !G.enchDisabled?.explo && Math.random() < G.explo * 0.001) {
+      const exploRange = G.explo >= 75 ? 2 : 1;
+      const row = Math.floor(idx / G.gridSize), col = idx % G.gridSize;
+      for (let dr = -exploRange; dr <= exploRange; dr++) {
+        for (let dc = -exploRange; dc <= exploRange; dc++) {
+          if (dr === 0 && dc === 0) continue;
+          const nr = row + dr, nc = col + dc;
+          if (nr < 0 || nr >= G.gridSize || nc < 0 || nc >= G.gridSize) continue;
+          const ni = nr * G.gridSize + nc;
+          if (!G.blocks[ni]) continue;
+          collectBlock(G.blocks[ni], null, ni);
+          G.blocks[ni] = null; G.blocksMined++; G.totalBlocks++;
+          renderSingleBlock(ni);
+        }
+      }
+    }
+    // LASER
+    if (G.laser > 0 && !G.enchDisabled?.laser && Math.random() < G.laser * 0.00005) {
+      const laserRow = Math.floor(idx / G.gridSize);
+      for (let lc = 0; lc < G.gridSize; lc++) {
+        const li = laserRow * G.gridSize + lc;
+        if (li === idx || !G.blocks[li]) continue;
+        collectBlock(G.blocks[li], null, li);
+        G.blocks[li] = null; G.blocksMined++; G.totalBlocks++;
+        renderSingleBlock(li);
+      }
+      spawnFloat('🔴 LASER!', window.innerWidth/2, window.innerHeight/3, '#ff7700');
+    }
+    // LIGHTNING
+    if (G.lightning > 0 && !G.enchDisabled?.lightning && Math.random() < G.lightning * 0.003) {
+      const lrow = Math.floor(idx / G.gridSize), lcol = idx % G.gridSize;
+      for (let dr = -2; dr <= 2; dr++) {
+        for (let dc = -2; dc <= 2; dc++) {
+          if (dr === 0 && dc === 0) continue;
+          const nr = lrow + dr, nc = lcol + dc;
+          if (nr < 0 || nr >= G.gridSize || nc < 0 || nc >= G.gridSize) continue;
+          const ni = nr * G.gridSize + nc;
+          if (!G.blocks[ni]) continue;
+          collectBlock(G.blocks[ni], null, ni);
+          G.blocks[ni] = null; G.blocksMined++; G.totalBlocks++;
+          renderSingleBlock(ni);
+        }
+      }
+      spawnFloat('⚡ LIGHTNING!', window.innerWidth/2, window.innerHeight/3, '#88eeee');
+    }
+    // MAGNET
+    if (G.magnet > 0 && !G.enchDisabled?.magnet && Math.random() < G.magnet * 0.025) {
+      const bonus = Math.floor(bl.coinBase * (1 + G.fortune * 0.1) * (1 + (G.rank-1)*0.02) * (1 + G.prestiges*0.25));
+      G.coins += bonus; G.totalCoins += bonus;
+      spawnFloat(`🧲 ×2! +${fmt(bonus)}🪙`, window.innerWidth/2, window.innerHeight/3, '#aaaaff');
+    }
+    // JACKPOT TESOURO
+    if (G.jackpot > 0 && !G.enchDisabled?.jackpot && Math.random() < G.jackpot * 0.00015) {
+      G.keys += 10; G.totalJackpots++;
+      spawnFloat(`💎 TESOURO! +10 🔑`, window.innerWidth/2, window.innerHeight/2, '#f5c842');
+      showToast(`💎 TESOURO ENCONTRADO! +10 🔑 Keys!`);
+    }
+    // FRENZY
+    if (!G.frenzyActive && G.frenzy > 0 && !G.enchDisabled?.frenzy && Math.random() < G.frenzy * 0.002) {
+      activateFrenzy();
+    }
+    // NUCLEAR
+    if (G.nuclear > 0 && !G.enchDisabled?.nuclear && Math.random() < G.nuclear * 0.001) {
+      activateNuclear();
+    }
+
     const total = G.gridSize * G.gridSize;
     let rem = 0; for (let _i = 0; _i < G.blocks.length; _i++) { if (G.blocks[_i]) rem++; }
     updateMineProgress(rem, total);
@@ -3673,7 +3844,7 @@ function setLBMiniTab(tab) {
     const isActive = b.id === 'lb-mini-tab-' + tab;
     b.classList.toggle('active', isActive);
     if (isActive) {
-      const colors = { coins:'var(--coin)', gems:'var(--gem)', rank:'var(--xp)' };
+      const colors = { coins:'var(--coin)', gems:'var(--gem)', rank:'var(--xp)', blocks:'#6edc7a' };
       b.style.borderColor = colors[tab] || 'var(--accent)';
       b.style.color = colors[tab] || 'var(--accent)';
     } else {
@@ -3696,8 +3867,8 @@ function _renderLBMiniRows(rows) {
   const medals = ['🥇','🥈','🥉','4️⃣','5️⃣'];
 
   // Sort by selected tab
-  const tabField = _lbMiniTab; // 'coins', 'gems', or 'rank'
-  const icons    = { coins:'🪙', gems:'💎', rank:'⭐' };
+  const tabField = _lbMiniTab; // 'coins', 'gems', 'rank', or 'blocks'
+  const icons    = { coins:'🪙', gems:'💎', rank:'⭐', blocks:'⛏️' };
   const sorted = [...rows].sort((a, b) => (b[tabField] || 0) - (a[tabField] || 0));
 
   lb.innerHTML = sorted.slice(0, 5).map((e, i) => {
@@ -3779,8 +3950,8 @@ function updateHUD() {
   document.getElementById('hud-rubi').textContent  = fmt(G.rubi||0);
   document.getElementById('inv-gems').textContent  = fmt(G.gems);
   document.getElementById('inv-coins').textContent = fmt(G.coins);
-  document.getElementById('inv-keys').textContent  = G.keys;
-  document.getElementById('inv-boosters').textContent = G.boosters;
+  document.getElementById('inv-keys').textContent  = fmt(G.keys);
+  document.getElementById('inv-boosters').textContent = fmt(G.boosters);
   // Brainrot coin income display
   const brainrotIncome = getBrainrotCoinIncome();
   const invBrainrot = document.getElementById('inv-brainrot-income');
@@ -3800,8 +3971,8 @@ function renderInvModal() {
     <div class="inv-grid">
       <div class="inv-item"><div class="i-label">💎 Gemas</div><div class="i-val">${fmt(G.gems)}</div></div>
       <div class="inv-item"><div class="i-label">🪙 Coins</div><div class="i-val">${fmt(G.coins)}</div></div>
-      <div class="inv-item"><div class="i-label">🔑 Keys</div><div class="i-val">${G.keys}</div></div>
-      <div class="inv-item"><div class="i-label">⚡ Boosters</div><div class="i-val">${G.boosters}</div></div>
+      <div class="inv-item"><div class="i-label">🔑 Keys</div><div class="i-val">${fmt(G.keys)}</div></div>
+      <div class="inv-item"><div class="i-label">⚡ Boosters</div><div class="i-val">${fmt(G.boosters)}</div></div>
       <div class="inv-item" style="grid-column:1/-1;border-color:#f5c842">
         <div class="i-label">🧠 Brainrot — Renda Passiva</div>
         <div class="i-val" style="color:#f5c842;font-size:16px">🪙 ${fmt(income)}/s</div>
@@ -3894,7 +4065,7 @@ const SAVE_KEYS = [
   'rank','xp','prestiges','pickIndex','pickHP','mineLevel','gridSize',
   'fortune','multi','explo','effic','midas','keychain','laser','frenzy','jackpot','magnet','lightning','golfinho','nuclear',
   'blocksMined','nextBoss',
-  'vipActive',
+  'vipActive','vipTier',
   'ownedSkins','equippedSkin','afkUnlocked','afkSpeed',
   'bossActive','bossHP','bossMaxHP',
   'bankBalance','bankLastCollect','lastDailyClaim','dailyStreak',
@@ -4005,14 +4176,53 @@ setInterval(() => {
   tickBooster();
 }, 1000);
 
-// Brainrot passive coin income — goes to PENDING AREA, not directly to player
+// ============================================================
+// TAB VISIBILITY & OFFLINE INCOME
+// ============================================================
+// Rastreia quando a aba fica oculta/visível para calcular ganhos offline
+G._tabHiddenAt = null;
+
+function _calcBrainrotPerSec() {
+  if (!G.brainrotSlots) return 0;
+  let total = 0;
+  const prestigeMult = 1 + G.prestiges * 0.25;
+  const rankMult = 1 + (G.rank - 1) * 0.02;
+  const _vipB = [1, 1.1, 1.15, 1.20, 1.25]; const vipM = G.vipActive ? (_vipB[G.vipTier] || 1.1) : 1;
+  const boosterMult = G.boosterActive ? 1.4 : 1;
+  const rebirthM = getRebirthMult().coin;
+  const BRAINROT_COIN_BASE = { comum: 4000, raro: 20000, 'épico': 120000, 'lendário': 800000, 'mítico': 6000000, celestial: 45000000 };
+  for (const slotId of G.brainrotSlots) {
+    if (!slotId) continue;
+    const b = BRAINROT_DATA.find(b => b.id === slotId);
+    if (!b) continue;
+    const base = BRAINROT_COIN_BASE[b.rarity] || 1000;
+    total += (base * b.coinMult * prestigeMult * rankMult * vipM * boosterMult * rebirthM) / 2; // /2 because tick was 2s
+  }
+  return total;
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    // Aba ficou oculta — salva o progresso
+    autoSave();
+  } else {
+    // Aba voltou a ficar visível — atualiza UI e salva
+    updateHUD();
+    updateBrainrotPendingUI();
+    autoSave();
+  }
+});
+
+// Brainrot passive coin income
+// Se a aba está ATIVA → coins vão DIRETO para o inventário (sem precisar coletar)
+// Se a aba está OCULTA → calculado no visibilitychange e vai para pending
 setInterval(() => {
-  // Brainrot: cada slot equipado gera coins passivamente por segundo
   if (!G.brainrotSlots) return;
+
   let totalCoinsPerTick = 0;
   const prestigeMult = 1 + G.prestiges * 0.25;
   const rankMult = 1 + (G.rank - 1) * 0.02;
-  const vipM = G.vipActive ? 1.1 : 1;
+  const _vipB = [1, 1.1, 1.15, 1.20, 1.25]; const vipM = G.vipActive ? (_vipB[G.vipTier] || 1.1) : 1;
   const boosterMult = G.boosterActive ? 1.4 : 1;
   const rebirthM = getRebirthMult().coin;
   const BRAINROT_COIN_BASE = { comum: 4000, raro: 20000, 'épico': 120000, 'lendário': 800000, 'mítico': 6000000, celestial: 45000000 };
@@ -4024,9 +4234,11 @@ setInterval(() => {
     totalCoinsPerTick += Math.floor(base * b.coinMult * prestigeMult * rankMult * vipM * boosterMult * rebirthM);
   }
   if (totalCoinsPerTick > 0) {
-    // Goes to PENDING AREA — player must collect manually
-    G.brainrotPending = (G.brainrotPending || 0) + totalCoinsPerTick;
+    // ABA ATIVA: vai DIRETO para o inventário!
+    G.coins += totalCoinsPerTick;
+    G.totalCoins += totalCoinsPerTick;
     updateBrainrotPendingUI();
+    updateHUD();
     autoSave();
   }
 }, 2000);
@@ -4049,10 +4261,14 @@ function updateBrainrotPendingUI() {
   if (!el) return;
   const amount = Math.floor(G.brainrotPending || 0);
   if (amount > 0) {
-    el.textContent = `💰 COLETAR ${fmt(amount)} 🪙`;
+    el.textContent = `💰 COLETAR OFFLINE: ${fmt(amount)} 🪙`;
     el.classList.add('has-coins');
   } else {
-    el.textContent = `🧠 Renda: 🪙 ${fmt(getBrainrotCoinIncome())}/s`;
+    const income = getBrainrotCoinIncome();
+    const isActive = !document.hidden;
+    el.textContent = isActive
+      ? `🧠 Brainrot ATIVO: 🪙 ${fmt(income)}/s → inventário!`
+      : `🧠 Renda: 🪙 ${fmt(income)}/s (pendente offline)`;
     el.classList.remove('has-coins');
   }
 }
@@ -4563,19 +4779,38 @@ function toggleEnchant(key) {
 function renderVIPModal() {
   const c = document.getElementById('vip-content');
   if (!c) return;
+  const _tierNames   = ['', 'VIP I', 'VIP II', 'VIP III', 'VIP IV'];
+  const _tierBonuses = ['', '+10%', '+15%', '+20%', '+25%'];
+  const _tierColors  = ['', '#df80ff', '#80cfff', '#80ffb0', '#ffd060'];
+  const _tierIcons   = ['', '👑', '💎', '🌟', '🔥'];
   if (G.vipActive) {
+    const tier = G.vipTier || 1;
     c.innerHTML = '<div style="text-align:center;padding:12px 0">'
-      + '<div style="font-size:44px">👑</div>'
-      + '<div style="font-size:18px;font-weight:900;color:#df80ff;margin:8px 0">VIP ATIVO!</div>'
+      + `<div style="font-size:44px">${_tierIcons[tier]}</div>`
+      + `<div style="font-size:18px;font-weight:900;color:${_tierColors[tier]};margin:8px 0">${_tierNames[tier]} ATIVO!</div>`
       + '<div style="font-size:13px;color:var(--muted);margin-bottom:16px;line-height:1.6">'
-      + '+10% em coins por bloco<br>+10% em gemas por bloco<br>+10% nas máquinas (coins e gemas)<br>Bônus permanente enquanto ativo'
+      + `${_tierBonuses[tier]} em coins por bloco<br>${_tierBonuses[tier]} em gemas por bloco<br>${_tierBonuses[tier]} nas máquinas (coins e gemas)<br>Bônus permanente enquanto ativo`
       + '</div>'
       + '<button class="btn-buy" style="background:#2a0a0a;border-color:#8a3030;color:#e85c5c" onclick="deactivateVIP()">Desativar VIP</button>'
       + '</div>';
   } else {
     c.innerHTML = '<div style="text-align:center;padding:8px 0 12px">'
       + '<div style="font-size:36px">🔒</div>'
-      + '<div style="font-size:13px;color:var(--muted);margin:8px 0 12px;line-height:1.6">VIP dá +10% em tudo!<br>Ative com uma key especial (uso único).</div>'
+      + '<div style="font-size:13px;color:var(--muted);margin:8px 0 12px;line-height:1.6">Ative com uma key especial (uso único).</div>'
+      + '</div>'
+      + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:12px">'
+      + '<div style="background:var(--panel2);border:1px solid #a040ff;border-radius:8px;padding:8px;text-align:center">'
+      + '<div style="font-size:20px">👑</div><div style="font-size:11px;font-weight:800;color:#df80ff">VIP I</div>'
+      + '<div style="font-size:10px;color:var(--muted)">+10% coins & gemas</div></div>'
+      + '<div style="background:var(--panel2);border:1px solid #80cfff;border-radius:8px;padding:8px;text-align:center">'
+      + '<div style="font-size:20px">💎</div><div style="font-size:11px;font-weight:800;color:#80cfff">VIP II</div>'
+      + '<div style="font-size:10px;color:var(--muted)">+15% coins & gemas</div></div>'
+      + '<div style="background:var(--panel2);border:1px solid #80ffb0;border-radius:8px;padding:8px;text-align:center">'
+      + '<div style="font-size:20px">🌟</div><div style="font-size:11px;font-weight:800;color:#80ffb0">VIP III</div>'
+      + '<div style="font-size:10px;color:var(--muted)">+20% coins & gemas</div></div>'
+      + '<div style="background:var(--panel2);border:1px solid #ffd060;border-radius:8px;padding:8px;text-align:center">'
+      + '<div style="font-size:20px">🔥</div><div style="font-size:11px;font-weight:800;color:#ffd060">VIP IV</div>'
+      + '<div style="font-size:10px;color:var(--muted)">+25% coins & gemas</div></div>'
       + '</div>'
       + '<div style="font-size:12px;color:var(--muted);margin-bottom:6px">🔑 Inserir Key VIP (uso único):</div>'
       + '<div style="display:flex;gap:8px;margin-bottom:12px">'
@@ -4590,7 +4825,13 @@ function renderVIPModal() {
       + '<div style="margin-top:10px;display:flex;flex-direction:column;gap:8px">'
       + '<input id="adm-user" type="text" placeholder="Usuário admin" style="background:var(--panel2);border:1px solid #8b5000;color:var(--text);padding:7px 10px;border-radius:6px;font-size:12px">'
       + '<input id="adm-pass" type="password" placeholder="Senha admin" style="background:var(--panel2);border:1px solid #8b5000;color:var(--text);padding:7px 10px;border-radius:6px;font-size:12px">'
-      + '<button class="btn-buy" style="border-color:#ff8800;color:#ffaa44;background:linear-gradient(135deg,#1a0800,#3a1a00)" onclick="adminGenerateKey()">⚡ Gerar Nova Key VIP</button>'
+      + '<select id="adm-key-type" style="background:var(--panel2);border:1px solid #8b5000;color:var(--text);padding:7px 10px;border-radius:6px;font-size:12px">'
+      + '<option value="vip1">👑 VIP I — +10% coins & gemas</option>'
+      + '<option value="vip2">💎 VIP II — +15% coins & gemas</option>'
+      + '<option value="vip3">🌟 VIP III — +20% coins & gemas</option>'
+      + '<option value="vip4">🔥 VIP IV — +25% coins & gemas</option>'
+      + '</select>'
+      + '<button class="btn-buy" style="border-color:#ff8800;color:#ffaa44;background:linear-gradient(135deg,#1a0800,#3a1a00)" onclick="adminGenerateKey()">⚡ Gerar Key VIP</button>'
       + '<div id="adm-key-result" style="font-size:13px;font-family:monospace;font-weight:800;color:#6edc7a;word-break:break-all;min-height:20px;background:var(--panel2);padding:6px 10px;border-radius:6px;border:1px solid var(--border)"></div>'
       + '</div></details>';
   }
@@ -4609,10 +4850,15 @@ async function tryActivateVIP() {
   const result = await window.redeemSingleKey(key);
   if (result.ok) {
     G.vipActive = true;
+    // Detect tier from key type
+    const _typeToTier = { 'vip': 1, 'vip1': 1, 'vip2': 2, 'vip3': 3, 'vip4': 4 };
+    G.vipTier = _typeToTier[result.type] || 1;
+    const _tierLabels = ['', '+10%', '+15%', '+20%', '+25%'];
+    const _tierNames  = ['', 'VIP I', 'VIP II', 'VIP III', 'VIP IV'];
     saveGame();
     updateVIPUI();
     closeModal('modal-vip');
-    showToast('👑 VIP ATIVADO! +10% em tudo! (Key destruída)');
+    showToast(`👑 ${_tierNames[G.vipTier] || 'VIP'} ATIVADO! ${_tierLabels[G.vipTier] || '+10%'} em tudo! (Key destruída)`);
   } else {
     if (status) status.textContent = result.msg;
     showToast(result.msg);
@@ -4622,10 +4868,12 @@ async function tryActivateVIP() {
 async function adminGenerateKey() {
   const u = (document.getElementById('adm-user')?.value || '').trim();
   const p = (document.getElementById('adm-pass')?.value || '').trim();
+  const sel = document.getElementById('adm-key-type');
+  const keyType = sel ? sel.value : 'vip1';
   const out = document.getElementById('adm-key-result');
   if (out) out.textContent = '⏳ Gerando...';
   if (!window.adminCreateKey) { if (out) out.textContent = '❌ Firebase não pronto'; return; }
-  const result = await window.adminCreateKey(u, p, 'vip');
+  const result = await window.adminCreateKey(u, p, keyType);
   if (result.ok) {
     if (out) out.textContent = result.key;
     showToast('✅ Key gerada: ' + result.key);
@@ -4646,9 +4894,16 @@ function deactivateVIP() {
 function updateVIPUI() {
   const bar = document.getElementById('vip-bar');
   const badge = document.getElementById('hud-vip');
+  const bonusEl = document.getElementById('vip-bar-bonus');
+  const _tierLabels = ['', '+10%', '+15%', '+20%', '+25%'];
+  const _tierNames  = ['', 'VIP I', 'VIP II', 'VIP III', 'VIP IV'];
   if (G.vipActive) {
     bar.classList.add('active');
-    if (badge) badge.style.display = 'flex';
+    if (bonusEl) bonusEl.textContent = _tierLabels[G.vipTier] || '+10%';
+    if (badge) {
+      badge.style.display = 'flex';
+      badge.innerHTML = `<span class="vip-badge">👑 ${_tierNames[G.vipTier] || 'VIP'}</span>`;
+    }
   } else {
     bar.classList.remove('active');
     if (badge) badge.style.display = 'none';
@@ -5120,10 +5375,10 @@ function renderPorreteHUD() {
   if (tier > 0 && PORRETE_DATA[tier-1]) {
     const p = PORRETE_DATA[tier-1];
     el.textContent = p.name + ' ' + p.icon;
-    if (el2) el2.textContent = p.dmg;
+    if (el2) el2.textContent = fmt(p.dmg);
   } else {
     el.textContent = 'Nenhum';
-    if (el2) el2.textContent = '1';
+    if (el2) el2.textContent = fmt(1);
   }
 }
 
@@ -5204,23 +5459,23 @@ function equipPorrete(tier) {
 // Tier 0 = sem porrete, Tier 1-8 = Porrete 1-8
 const ARENA_BOSS_TIERS = [
   // tier 0 — sem porrete
-  { name:'Rato da Prisão',      icon:'🐀', maxHp:4,     rubiDrop:3,    xpDrop:2,   respawnSecs:5,   color:'#888' },
+  { name:'Rato da Prisão',      icon:'🐀', maxHp:4,     rubiDrop:3,    xpDrop:2,   respawnSecs:20,  color:'#888' },
   // tier 1 — Porrete 1
-  { name:'Guarda Novato',       icon:'💂', maxHp:12,    rubiDrop:8,    xpDrop:5,   respawnSecs:12,  color:'#4488ff' },
+  { name:'Guarda Novato',       icon:'💂', maxHp:12,    rubiDrop:8,    xpDrop:5,   respawnSecs:20,  color:'#4488ff' },
   // tier 2 — Porrete 2
-  { name:'Cão Bravo',           icon:'🐕', maxHp:40,    rubiDrop:20,   xpDrop:15,  respawnSecs:25,  color:'#88cc44' },
+  { name:'Cão Bravo',           icon:'🐕', maxHp:40,    rubiDrop:20,   xpDrop:15,  respawnSecs:20,  color:'#88cc44' },
   // tier 3 — Porrete 3
-  { name:'Preso Boxeador',      icon:'🥊', maxHp:140,   rubiDrop:50,   xpDrop:40,  respawnSecs:45,  color:'#c97cf5' },
+  { name:'Preso Boxeador',      icon:'🥊', maxHp:140,   rubiDrop:50,   xpDrop:40,  respawnSecs:20,  color:'#c97cf5' },
   // tier 4 — Porrete 4
-  { name:'Chefe do Bloco',      icon:'👹', maxHp:480,   rubiDrop:120,  xpDrop:100, respawnSecs:90,  color:'#f5c842' },
+  { name:'Chefe do Bloco',      icon:'👹', maxHp:480,   rubiDrop:120,  xpDrop:100, respawnSecs:20,  color:'#f5c842' },
   // tier 5 — Porrete 5
-  { name:'Diretor Corrupto',    icon:'😈', maxHp:2000,  rubiDrop:350,  xpDrop:250, respawnSecs:180, color:'#ff6ab0' },
+  { name:'Diretor Corrupto',    icon:'😈', maxHp:2000,  rubiDrop:350,  xpDrop:250, respawnSecs:20,  color:'#ff6ab0' },
   // tier 6 — Porrete 6
-  { name:'Carrasco da Gaiola',  icon:'🪖', maxHp:8000,  rubiDrop:900,  xpDrop:600, respawnSecs:300, color:'#ff4444' },
+  { name:'Carrasco da Gaiola',  icon:'🪖', maxHp:8000,  rubiDrop:900,  xpDrop:600, respawnSecs:20,  color:'#ff4444' },
   // tier 7 — Porrete 7
-  { name:'Titã do Presídio',    icon:'👾', maxHp:32000, rubiDrop:2500, xpDrop:1500,respawnSecs:480, color:'#ff8800' },
+  { name:'Titã do Presídio',    icon:'👾', maxHp:32000, rubiDrop:2500, xpDrop:1500,respawnSecs:20,  color:'#ff8800' },
   // tier 8 — Porrete 8
-  { name:'O Ceifador',          icon:'💀', maxHp:140000,rubiDrop:8000, xpDrop:5000,respawnSecs:720, color:'#cc00ff' },
+  { name:'O Ceifador',          icon:'💀', maxHp:140000,rubiDrop:8000, xpDrop:5000,respawnSecs:20,  color:'#cc00ff' },
 ];
 
 const ARENA_COUNT_BASE = 9; // instâncias base por boss
@@ -5267,7 +5522,7 @@ function renderArenaMobs() {
   if (tierEl) {
     tierEl.innerHTML = `<span style="color:${boss.color};font-weight:900;font-size:13px">${boss.icon} ${boss.name}</span>
       <span style="font-size:10px;color:var(--muted)"> — Tier ${tier}${tier===0?' (sem porrete)':' (Porrete '+tier+')'}</span>
-      <span style="font-size:11px;color:#e84393;font-weight:800;margin-left:6px">+${boss.rubiDrop} 💠/kill</span>`;
+      <span style="font-size:11px;color:#e84393;font-weight:800;margin-left:6px">+${fmt(boss.rubiDrop)} 💠/kill</span>`;
   }
 
   c.innerHTML = '';
@@ -5287,10 +5542,10 @@ function renderArenaMobs() {
       <div class="mob-icon">${boss.icon}</div>
       <div class="mob-name" style="color:${boss.color}">${boss.name} #${i+1}</div>
       <div class="mob-hp-bar"><div class="mob-hp-fill" style="width:${pct}%;background:linear-gradient(90deg,${boss.color}88,${boss.color})"></div></div>
-      <div class="mob-info">❤️ ${Math.max(0,state.hp)}/${boss.maxHp}</div>
+      <div class="mob-info">❤️ ${fmt(Math.max(0,state.hp))}/${fmt(boss.maxHp)}</div>
       ${stillDead
         ? `<div style="color:#f5c842;font-size:12px;font-weight:800">⏳ ${respawnLeft}s</div>`
-        : `<div class="mob-rubi-drop">+${boss.rubiDrop} 💠</div>`}
+        : `<div class="mob-rubi-drop">+${fmt(boss.rubiDrop)} 💠</div>`}
     `;
     if (!stillDead) div.onclick = () => attackMob(i);
     c.appendChild(div);
@@ -5320,12 +5575,12 @@ function attackMob(idx) {
     state.respawnAt = now + boss.respawnSecs * 1000;
     G.rubi = (G.rubi || 0) + boss.rubiDrop;
     G.totalRubi = (G.totalRubi || 0) + boss.rubiDrop;
-    spawnFloat(`+${boss.rubiDrop} 💠`, window.innerWidth/2, window.innerHeight/2 - 40, '#e84393');
-    showToast(`⚔️ ${boss.name} #${idx+1} derrotado! +${boss.rubiDrop} 💠`);
+    spawnFloat(`+${fmt(boss.rubiDrop)} 💠`, window.innerWidth/2, window.innerHeight/2 - 40, '#e84393');
+    showToast(`⚔️ ${boss.name} #${idx+1} derrotado! +${boss.rubiDrop} 💠 +${fmt(boss.xpDrop)} XP`);
     gainXP(boss.xpDrop);
     updateHUD();
   } else {
-    spawnFloat(`-${dmg}`, window.innerWidth/2, window.innerHeight/2 - 20, '#e85c5c');
+    spawnFloat(`-${fmt(dmg)}`, window.innerWidth/2, window.innerHeight/2 - 20, '#e85c5c');
   }
 
   renderArenaMobs();
@@ -5477,6 +5732,26 @@ window._renderChat = function(msgs) {
     setTimeout(waitForChat, 300);
   }
 })();
+
+// ── FECHAR ABA: para tudo e salva ──────────────────────────────────────────
+window.addEventListener('beforeunload', () => {
+  // Para AFK
+  if (G.afkIntervalId) { clearInterval(G.afkIntervalId); G.afkIntervalId = null; }
+  // Calcula brainrot pendente do tempo que ficou oculto (caso aba esteja oculta ao fechar)
+  if (G._tabHiddenAt) {
+    const offlineSecs = Math.max(0, (Date.now() - G._tabHiddenAt) / 1000);
+    const brainrotPerSec = _calcBrainrotPerSec();
+    if (brainrotPerSec > 0 && offlineSecs > 0) {
+      const earned = Math.floor(brainrotPerSec * offlineSecs);
+      if (earned > 0) G.brainrotPending = (G.brainrotPending || 0) + earned;
+    }
+    G._tabHiddenAt = null;
+  }
+  // Salva síncronamente via localStorage antes de fechar
+  try { localStorage.setItem('prisonMineV20', JSON.stringify(G)); } catch(e) {}
+  // Tenta salvar na nuvem (best-effort, pode não completar)
+  if (window.saveToCloud) window.saveToCloud(true);
+});
 
 init();
 // Safety net: if something throws after init starts, still try to show the game
