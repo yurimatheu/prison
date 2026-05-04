@@ -1563,7 +1563,7 @@
     <button class="modal-close" onclick="closeModal('modal-rebirth')">×</button>
     <h2 style="color:#ff6ab0">♻️ Rebirth</h2>
     <div style="font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.6">
-      Rebirth reseta rank, coins, picareta e <b style="color:#ff6ab0">todos os seus Brainrots</b> em troca de um multiplicador permanente de Coins e Gemas. Rubi 💠 é obtido na <b style="color:#e84393">⚔️ Gaiola</b> matando mobs!
+      Rebirth reseta rank, coins, picareta e <b style="color:#ff6ab0">seus Brainrots (inventário + slots)</b> em troca de um multiplicador permanente de Coins e Gemas. Rubi 💠 é obtido na <b style="color:#e84393">⚔️ Gaiola</b> matando mobs!
     </div>
     <div style="background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:12px;">
       <div>Rebirth atual: <b id="rebirth-count-modal" style="color:#ff6ab0">0</b></div>
@@ -4214,8 +4214,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // Brainrot passive coin income
-// Se a aba está ATIVA → coins vão DIRETO para o inventário (sem precisar coletar)
-// Se a aba está OCULTA → calculado no visibilitychange e vai para pending
+// Sempre acumula em brainrotPending — o jogador precisa coletar manualmente clicando no botão
 setInterval(() => {
   if (!G.brainrotSlots) return;
 
@@ -4234,11 +4233,9 @@ setInterval(() => {
     totalCoinsPerTick += Math.floor(base * b.coinMult * prestigeMult * rankMult * vipM * boosterMult * rebirthM);
   }
   if (totalCoinsPerTick > 0) {
-    // ABA ATIVA: vai DIRETO para o inventário!
-    G.coins += totalCoinsPerTick;
-    G.totalCoins += totalCoinsPerTick;
+    // Sempre vai para pending — jogador precisa coletar manualmente!
+    G.brainrotPending = (G.brainrotPending || 0) + totalCoinsPerTick;
     updateBrainrotPendingUI();
-    updateHUD();
     autoSave();
   }
 }, 2000);
@@ -4261,14 +4258,11 @@ function updateBrainrotPendingUI() {
   if (!el) return;
   const amount = Math.floor(G.brainrotPending || 0);
   if (amount > 0) {
-    el.textContent = `💰 COLETAR OFFLINE: ${fmt(amount)} 🪙`;
+    el.textContent = `💰 COLETAR BRAINROT: ${fmt(amount)} 🪙`;
     el.classList.add('has-coins');
   } else {
     const income = getBrainrotCoinIncome();
-    const isActive = !document.hidden;
-    el.textContent = isActive
-      ? `🧠 Brainrot ATIVO: 🪙 ${fmt(income)}/s → inventário!`
-      : `🧠 Renda: 🪙 ${fmt(income)}/s (pendente offline)`;
+    el.textContent = `🧠 Brainrot: 🪙 ${fmt(income)}/s (clique para coletar)`;
     el.classList.remove('has-coins');
   }
 }
@@ -5312,7 +5306,7 @@ function doRebirth(tier) {
       <div style="font-size:18px;font-weight:900;color:#ff6ab0;margin-bottom:12px">Confirmar Rebirth ${tier}?</div>
       <div style="font-size:13px;color:#f5c842;margin-bottom:6px">Custo: 🪙 ${fmt(t.costCoins)} + 💠 ${t.costRubi} Rubi</div>
       <div style="font-size:13px;color:#6edc7a;margin-bottom:6px">Bônus: ×${t.coinMult.toFixed(2)} Coins e Gemas PERMANENTE</div>
-      <div style="font-size:12px;color:#e85c5c;margin-bottom:16px">⚠️ Vai resetar: rank, coins, picareta e todos os Brainrots</div>
+      <div style="font-size:12px;color:#e85c5c;margin-bottom:16px">⚠️ Vai resetar: rank, coins, picareta e seus Brainrots (inventário + slots)</div>
       <div style="display:flex;gap:10px;justify-content:center">
         <button onclick="confirmRebirth()" style="flex:1;padding:12px;border-radius:8px;font-weight:900;font-size:14px;cursor:pointer;
           background:linear-gradient(135deg,#3a0030,#8a0060);border:2px solid #e84393;color:#ff6ab0;">
@@ -5346,7 +5340,7 @@ function confirmRebirth() {
   G.brainrotPending = 0;
   _rebirthPendingTier = 0;
   spawnFloat('♻️ REBIRTH ' + tier + '!', window.innerWidth/2, window.innerHeight/2, '#ff6ab0');
-  showToast('♻️ Rebirth ' + tier + ' completo! ×' + t.coinMult.toFixed(2) + ' permanente! (Brainrots resetados)');
+  showToast('♻️ Rebirth ' + tier + ' completo! ×' + t.coinMult.toFixed(2) + ' permanente! Brainrots resetados!');
   updateHUD(); updateRankUI(); updatePickUI();
   renderBrainrotSlots();
   renderRebirthModal();
