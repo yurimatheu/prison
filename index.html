@@ -262,20 +262,25 @@
   }
 
   // Admin: create a new single-use key stored in Firestore
-  window.adminCreateKey = async function(adminUser, adminPass, keyType) {
+  window.adminCreateKey = async function(adminUser, adminPass, keyType, qty) {
     if (adminUser !== ADMIN_USER || adminPass !== ADMIN_PASS) {
       return { ok: false, msg: '❌ Credenciais de admin incorretas!' };
     }
-    const keyStr = _genKeyStr();
+    qty = Math.max(1, Math.min(300, parseInt(qty) || 1));
+    const keys = [];
     try {
-      await setDoc(doc(db, 'singlekeys', keyStr), {
-        type: keyType || 'vip',   // 'vip' or any future type
-        used: false,
-        usedBy: null,
-        usedAt: null,
-        createdAt: serverTimestamp()
-      });
-      return { ok: true, key: keyStr };
+      for (let i = 0; i < qty; i++) {
+        const keyStr = _genKeyStr();
+        await setDoc(doc(db, 'singlekeys', keyStr), {
+          type: keyType || 'vip1',
+          used: false,
+          usedBy: null,
+          usedAt: null,
+          createdAt: serverTimestamp()
+        });
+        keys.push(keyStr);
+      }
+      return { ok: true, keys, key: keys[0] };
     } catch(e) { return { ok: false, msg: '❌ Erro ao criar key: ' + e.message }; }
   };
 
@@ -1359,13 +1364,11 @@
 </div>
 
 <div class="modal-overlay" id="modal-key">
-  <div class="modal">
+  <div class="modal" style="max-width:480px">
+    <!-- preenchido por renderKeyModal() -->
     <button class="modal-close" onclick="closeModal('modal-key')">×</button>
     <h2>🔑 Keys</h2>
-    <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
-      <button class="btn-buy" onclick="openOneKey()">🔑 Abrir 1 Key</button>
-      <button class="btn-buy" onclick="openAllKeys()">🔑 Abrir Todas (<span id="keys-count-btn">0</span>)</button>
-    </div>
+    <div id="key-tab-content"></div>
     <div id="key-result"></div>
     <div id="key-all-result" style="display:none;margin-top:10px;"></div>
   </div>
@@ -1563,7 +1566,7 @@
     <button class="modal-close" onclick="closeModal('modal-rebirth')">×</button>
     <h2 style="color:#ff6ab0">♻️ Rebirth</h2>
     <div style="font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.6">
-      Rebirth reseta <b style="color:#ff6ab0">seus Brainrots (inventário + slots)</b> em troca de um multiplicador permanente de Coins e Gemas. Rubi 💠 é obtido na <b style="color:#e84393">⚔️ Gaiola</b> matando mobs!
+      Rebirth reseta rank, coins, picareta e <b style="color:#ff6ab0">seus Brainrots (inventário + slots)</b> em troca de um multiplicador permanente de Coins e Gemas. Rubi 💠 é obtido na <b style="color:#e84393">⚔️ Gaiola</b> matando mobs!
     </div>
     <div style="background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:12px;">
       <div>Rebirth atual: <b id="rebirth-count-modal" style="color:#ff6ab0">0</b></div>
@@ -1825,9 +1828,18 @@
 
     <!-- Booster info -->
     <div class="panel">
-      <div class="panel-title">⚡ Booster</div>
+      <div class="panel-title">⚡ Booster Normal</div>
       <div id="booster-info">Sem booster ativo.</div>
       <button class="hud-btn" style="width:100%;margin-top:6px" onclick="activateBooster()">⚡ Ativar Booster</button>
+      <button class="hud-btn" id="auto-booster-btn" style="width:100%;margin-top:4px;font-size:11px;border-color:#6edc7a;color:#6edc7a;opacity:0.5" onclick="toggleAutoBooster()" title="Requer Prestígio 1">🔁 Auto-Booster: OFF</button>
+    </div>
+
+    <!-- Rubi Booster panel -->
+    <div class="panel" style="border-color:#6a0030;background:linear-gradient(135deg,#1a0020,#2a0040)">
+      <div class="panel-title" style="color:#e84393">💠 Booster de Rubi</div>
+      <div id="rubi-booster-info" style="font-size:12px;color:#e84393">Sem Booster de Rubi.</div>
+      <button class="hud-btn" style="width:100%;margin-top:6px;border-color:#e84393;color:#e84393;background:rgba(232,67,147,0.1)" onclick="activateRubiBooster()">💠⚡ Ativar Booster de Rubi</button>
+      <div style="font-size:10px;color:#a06080;margin-top:4px;text-align:center">+100% Rubi por 5 min • Obtido nas Chaves Rubi Lendárias</div>
     </div>
 
   </div>
@@ -1855,7 +1867,10 @@ const G = {
   coins: 0,
   gems: 50,
   keys: 0,
+  rubiKeys: 0,
+  midasKeys: 0,
   boosters: 0,
+  rubiBooster: 0,
   spawners: 0,
   spawners2: 0,
   machineUpgrades: { speed:0, gem:0, coin:0 },
@@ -1941,6 +1956,9 @@ const G = {
   // Booster
   boosterActive: false,
   boosterTimer: 0,
+  autoBooster: false,
+  rubiBoosterActive: false,
+  rubiBoosterTimer: 0,
 
   // Boss
   bossActive: false,
@@ -2008,25 +2026,25 @@ const BLOCK_TYPES = [
 ];
 
 const SKINS_DATA = [
-  { id:'stone',  name:'Pedra',     icon:'🪨', bonus:'×1.8 coins',  cost:50000,   effect:'coinMult', val:1.8  },
-  { id:'fire',   name:'Fogo',      icon:'🔥', bonus:'×1.6 + keys', cost:150000,  effect:'fire',     val:1.6  },
-  { id:'ice',    name:'Gelo',      icon:'❄️', bonus:'+velocidade', cost:100000,  effect:'speed',    val:1.5  },
-  { id:'elec',   name:'Elétrica',  icon:'⚡', bonus:'+explosão',   cost:100000000, effect:'elec',   val:2.0  },
+  { id:'stone',  name:'Pedra',     icon:'🪨', bonus:'×1.2 coins+gemas',  cost:50000,    effect:'both', coinVal:1.2, gemVal:1.2  },
+  { id:'fire',   name:'Fogo',      icon:'🔥', bonus:'×1.4 coins+gemas',  cost:150000,   effect:'both', coinVal:1.4, gemVal:1.4  },
+  { id:'ice',    name:'Gelo',      icon:'❄️', bonus:'×1.55 coins+gemas', cost:100000,   effect:'both', coinVal:1.55, gemVal:1.55 },
+  { id:'elec',   name:'Elétrica',  icon:'⚡', bonus:'×1.7 coins+gemas',  cost:100000000,effect:'both', coinVal:1.7, gemVal:1.7  },
 ];
 
 const ENCH_DATA = [
   { key:'fortune',  name:'Fortune',       max:1000, unit:'💎 gemas', desc:'Aumenta coins por bloco' },
   { key:'multi',    name:'Multiplicador', max:1000, unit:'💎 gemas', desc:'Aumenta gemas por bloco' },
   { key:'explo',    name:'Explosão',      max:150,  unit:'💎 gemas', desc:'Chance área (5×5 após nív 75)' },
-  { key:'midas',    name:'Midas',         max:100,  unit:'💎 gemas', desc:'Chance buff ouro' },
+  { key:'midas',    name:'Midas',         max:100,  unit:'💎 gemas', desc:'Chance de ativar Midas (0.009%/nível)' },
   { key:'keychain', name:'Chaveiro',      max:30,   unit:'💎 gemas', desc:'Chance extra de key por bloco (0.25%/nív, máx 7.5%)' },
   { key:'laser',    name:'Laser',         max:40,   unit:'💎 gemas', desc:'Quebra fileira inteira' },
   { key:'frenzy',   name:'🔥 Frenzy',    max:50,   unit:'💎 gemas', desc:'Chance de mineração ultra-rápida por 5s' },
-  { key:'jackpot',  name:'💎 Tesouro',   max:50,   unit:'💎 gemas', desc:'Chance rara de encontrar um tesouro com +10 Keys! (0.05%/nível)' },
+  { key:'jackpot',  name:'💎 Tesouro',   max:50,   unit:'💎 gemas', desc:'Chance rara de encontrar um tesouro com +10 Keys! (0.015%/nível)' },
   { key:'magnet',   name:'🧲 Ímã',       max:30,   unit:'💎 gemas', desc:'Chance de dobrar coins do bloco atual' },
-  { key:'lightning',name:'⚡ Relâmpago', max:20,   unit:'💎 gemas', desc:'Chance de quebrar área 5×5' },
+  { key:'lightning',name:'⚡ Relâmpago', max:20,   unit:'💎 gemas', desc:'Chance de quebrar área 5×5 (0.06%/nível)' },
   { key:'golfinho', name:'🐬 Golfinho',  max:3000, unit:'💎 gemas', desc:'+200% XP de rank por nível 1000 (máx +600%). Custo total full: 100 Ss' },
-  { key:'nuclear',  name:'☢️ Nuclear',   max:100,  unit:'💠 rubi',  desc:'Chance de quebrar TODOS os blocos da mina ao minar! Ativa automaticamente por sorte. Custa Rubi. Custo inicial: 80 💠, +5 por nível' },
+  { key:'nuclear',  name:'☢️ Nuclear',   max:100,  unit:'💠 rubi',  desc:'Chance de quebrar TODOS os blocos da mina ao minar! Ativa automaticamente por sorte (0.0001%/nível). Custo inicial: 80 💠, +5 por nível. Nuclear NÃO gasta Rubi ao ativar!' },
 ];
 
 // Coin and gem bonus per pickaxe tier (multiplier applied in collectBlock)
@@ -2121,6 +2139,51 @@ const BRAINROT_DATA = [
   { id:'universo_brainrot',name:'Universo Brainrot',icon:'🪐',rarity:'celestial', coinMult:4.00, gemMult:4.00, desc:'+300% TUDO — O MAIS RARO!' },
   { id:'omega_universe', name:'Omega Universe',    icon:'🔮', rarity:'celestial', coinMult:4.50, gemMult:4.50, desc:'+350% TUDO — ULTRA SECRETO' },
   { id:'il_creatore',    name:'Il Creatore',       icon:'✨', rarity:'celestial', coinMult:5.00, gemMult:5.00, desc:'+400% TUDO — CRIADOR SUPREMO!' },
+
+  // ── NOVOS COMUNS ──
+  { id:'gamba_pazzo',    name:'Gamba Pazzo',       icon:'🦐', rarity:'comum',   coinMult:1.10, gemMult:1.08, desc:'+10% coins/s' },
+  { id:'lumacone',       name:'Lumacone Ciao',     icon:'🐌', rarity:'comum',   coinMult:1.09, gemMult:1.11, desc:'+11% coins/s' },
+  { id:'pappagallino',   name:'Pappagallino',      icon:'🦜', rarity:'comum',   coinMult:1.12, gemMult:1.06, desc:'+12% coins/s' },
+  { id:'formicaio',      name:'Formicaio',         icon:'🐜', rarity:'comum',   coinMult:1.07, gemMult:1.13, desc:'+13% coins/s' },
+  { id:'topolino_bro',   name:'Topolino Bro',      icon:'🐹', rarity:'comum',   coinMult:1.11, gemMult:1.09, desc:'+11% coins/s' },
+  { id:'farfalline',     name:'Farfalline Dance',  icon:'🦋', rarity:'comum',   coinMult:1.08, gemMult:1.12, desc:'+12% coins/s' },
+  { id:'riccio_loco',    name:'Riccio Loco',       icon:'🦔', rarity:'comum',   coinMult:1.13, gemMult:1.07, desc:'+13% coins/s' },
+  { id:'tacchino_pro',   name:'Tacchino Pro',      icon:'🦃', rarity:'comum',   coinMult:1.10, gemMult:1.10, desc:'+10% coins/s' },
+
+  // ── NOVOS RAROS ──
+  { id:'squalo_volante', name:'Squalo Volante',    icon:'🦈', rarity:'raro',    coinMult:1.22, gemMult:1.19, desc:'+22% coins/s' },
+  { id:'corvo_misterioso',name:'Corvo Misterioso', icon:'🐦‍⬛', rarity:'raro',   coinMult:1.20, gemMult:1.23, desc:'+23% coins/s' },
+  { id:'cervo_ribelle',  name:'Cervo Ribelle',     icon:'🦌', rarity:'raro',    coinMult:1.24, gemMult:1.18, desc:'+24% coins/s' },
+  { id:'struzzo_folle',  name:'Struzzo Folle',     icon:'🦤', rarity:'raro',    coinMult:1.19, gemMult:1.25, desc:'+25% coins/s' },
+  { id:'cigno_nero_ok',  name:'Cigno Nero',        icon:'🦢', rarity:'raro',    coinMult:1.23, gemMult:1.21, desc:'+23% coins/s' },
+  { id:'fenicottero_paz',name:'Fenicottero Paz',   icon:'🦩', rarity:'raro',    coinMult:1.21, gemMult:1.24, desc:'+24% coins/s' },
+  { id:'kiwi_brainrot',  name:'Kiwi Brainrot',     icon:'🥝', rarity:'raro',    coinMult:1.26, gemMult:1.17, desc:'+26% coins/s' },
+  { id:'axolotl_furia',  name:'Axolotl Furia',     icon:'🫎', rarity:'raro',    coinMult:1.18, gemMult:1.27, desc:'+27% coins/s' },
+
+  // ── NOVOS ÉPICOS ──
+  { id:'mantide_reale',  name:'Mantide Reale',     icon:'🦗', rarity:'épico',   coinMult:1.38, gemMult:1.32, desc:'+38% coins/s' },
+  { id:'pipistrello_re', name:'Pipistrello Re',    icon:'🦇', rarity:'épico',   coinMult:1.33, gemMult:1.38, desc:'+38% coins/s' },
+  { id:'tortugo_lento',  name:'Tortugo Lento',     icon:'🐢', rarity:'épico',   coinMult:1.40, gemMult:1.33, desc:'+40% coins/s' },
+  { id:'cobra_real',     name:'Cobra Real',        icon:'🐍', rarity:'épico',   coinMult:1.36, gemMult:1.36, desc:'+36% coins/s' },
+  { id:'bufalo_selvagem',name:'Bufalo Selvaggio',  icon:'🦬', rarity:'épico',   coinMult:1.42, gemMult:1.30, desc:'+42% coins/s' },
+  { id:'alce_cosmico',   name:'Alce Cosmico',      icon:'🫎', rarity:'épico',   coinMult:1.30, gemMult:1.42, desc:'+42% coins/s' },
+
+  // ── NOVOS LENDÁRIOS ──
+  { id:'raggio_solare',  name:'Raggio Solare',     icon:'🌞', rarity:'lendário',coinMult:1.72, gemMult:1.55, desc:'+72% coins/s' },
+  { id:'tempesta_blu',   name:'Tempesta Blu',      icon:'🌊', rarity:'lendário',coinMult:1.60, gemMult:1.65, desc:'+65% coins/s' },
+  { id:'vulcano_vivo',   name:'Vulcano Vivo',      icon:'🌋', rarity:'lendário',coinMult:1.68, gemMult:1.58, desc:'+68% coins/s' },
+  { id:'aurora_boreale', name:'Aurora Boreale',    icon:'🌌', rarity:'lendário',coinMult:1.55, gemMult:1.70, desc:'+70% coins/s' },
+  { id:'arcobaleno_re',  name:'Arcobaleno Re',     icon:'🌈', rarity:'lendário',coinMult:1.75, gemMult:1.60, desc:'+75% coins/s' },
+
+  // ── NOVOS MÍTICOS ──
+  { id:'titano_oscuro',  name:'Titano Oscuro',     icon:'👹', rarity:'mítico',  coinMult:2.35, gemMult:2.20, desc:'+135% coins/s' },
+  { id:'ombra_eterna',   name:'Ombra Eterna',      icon:'🌑', rarity:'mítico',  coinMult:2.25, gemMult:2.40, desc:'+140% coins/s' },
+  { id:'re_del_vuoto',   name:'Re del Vuoto',      icon:'🕳️', rarity:'mítico',  coinMult:2.50, gemMult:2.50, desc:'+150% coins/s' },
+  { id:'guardiano_chaos',name:'Guardiano Chaos',   icon:'⚔️', rarity:'mítico',  coinMult:2.60, gemMult:2.45, desc:'+160% coins/s' },
+
+  // ── NOVOS CELESTIAIS ──
+  { id:'iperuranio',     name:'Iperuranio',        icon:'🔱', rarity:'celestial',coinMult:5.50, gemMult:5.50, desc:'+450% TUDO — ALÉM DO UNIVERSO!' },
+  { id:'principio_primo',name:'Principio Primo',   icon:'🌐', rarity:'celestial',coinMult:6.00, gemMult:6.00, desc:'+500% TUDO — O INÍCIO DE TUDO!' },
 ];
 
 const BRAINROT_RARITY_WEIGHTS = {
@@ -2220,9 +2283,9 @@ function getRebirthMult() {
 const enchCost = (key, lvl) => {
   // Todos os encantamentos multiplicam o custo por 1.055x a cada nível
   const base = {
-    fortune:80,    multi:5,       explo:14,     midas:18,
-    keychain:8000, laser:300,     frenzy:80000, jackpot:120000,
-    magnet:8000,   lightning:150000, effic:8,    golfinho:500,
+    fortune:80,    multi:5,       explo:14,     midas:50,
+    keychain:8000, laser:800,     frenzy:200000, jackpot:350000,
+    magnet:25000,  lightning:400000, effic:8,   golfinho:500,
     nuclear:0
   };
   const b = base[key] || 8;
@@ -2499,7 +2562,7 @@ function mineBlock(idx, el) {
   }
 
   // LIGHTNING: quebra área 5×5
-  if (!isExplo && G.lightning > 0 && !G.enchDisabled?.lightning && Math.random() < G.lightning * 0.003) {
+  if (!isExplo && G.lightning > 0 && !G.enchDisabled?.lightning && Math.random() < G.lightning * 0.0006) {
     const lrow = Math.floor(idx / G.gridSize), lcol = idx % G.gridSize;
     for (let dr = -2; dr <= 2; dr++) {
       for (let dc = -2; dc <= 2; dc++) {
@@ -2525,12 +2588,18 @@ function mineBlock(idx, el) {
     }
   }
 
-  // JACKPOT TESOURO — chance baixa, dá 10 keys
+  // JACKPOT TESOURO — chance baixa, dá Chave Midas (0.01%) ou 10 keys normais
   if (G.jackpot > 0 && !G.enchDisabled?.jackpot && Math.random() < G.jackpot * 0.00015) {
-    G.keys += 10;
     G.totalJackpots++;
-    spawnFloat(`💎 TESOURO! +10 🔑`, window.innerWidth/2, window.innerHeight/2, '#f5c842');
-    showToast(`💎 TESOURO ENCONTRADO! +10 🔑 Keys!`);
+    if (Math.random() < 0.0001) {
+      G.midasKeys = (G.midasKeys||0) + 1;
+      spawnFloat(`✨ CHAVE MIDAS!`, window.innerWidth/2, window.innerHeight/2, '#ffe066');
+      showToast(`✨ CHAVE MIDAS ENCONTRADA! Raridade extrema!`);
+    } else {
+      G.keys += 10;
+      spawnFloat(`💎 TESOURO! +10 🔑`, window.innerWidth/2, window.innerHeight/2, '#f5c842');
+      showToast(`💎 TESOURO ENCONTRADO! +10 🔑 Keys!`);
+    }
     updateHUD();
   }
 
@@ -2540,7 +2609,7 @@ function mineBlock(idx, el) {
   }
 
   // NUCLEAR — ativa por chance ao minar (sem botão manual)
-  if (G.nuclear > 0 && !G.enchDisabled?.nuclear && Math.random() < G.nuclear * 0.001) {
+  if (G.nuclear > 0 && !G.enchDisabled?.nuclear && Math.random() < G.nuclear * 0.000001) {
     activateNuclear();
   }
 
@@ -2691,7 +2760,7 @@ function collectBlock(b, el, idx) {
   // (moved to brainrot tick)
 
   // Check Midas trigger — chance reduzida (era 0.002, agora 0.0006)
-  if (!G.midasActive && G.midas > 0 && !G.enchDisabled?.midas && Math.random() < G.midas * 0.0004) {
+  if (!G.midasActive && G.midas > 0 && !G.enchDisabled?.midas && Math.random() < G.midas * 0.00009) {
     activateMidas();
   }
 
@@ -2725,17 +2794,13 @@ function getSkinCoinMult() {
   if (!G.equippedSkin) return 1;
   const s = SKINS_DATA.find(s => s.id === G.equippedSkin);
   if (!s) return 1;
-  if (s.effect === 'coinMult') return s.val;
-  if (s.effect === 'fire') return s.val;  // fire: 1.6x coins
-  return 1;
+  return s.coinVal || 1;
 }
 function getSkinGemMult() {
   if (!G.equippedSkin) return 1;
   const s = SKINS_DATA.find(s => s.id === G.equippedSkin);
   if (!s) return 1;
-  if (s.effect === 'fire') return 1.6;    // fire: 1.6x gems (fixed)
-  if (s.effect === 'elec') return 1.2;    // elec: bonus gem mult
-  return 1;
+  return s.gemVal || 1;
 }
 
 function getBrainrotMult() {
@@ -3198,8 +3263,143 @@ function upgradeMachineGem() {
 }
 
 // ============================================================
-// KEYS
+// KEY TYPES
 // ============================================================
+const KEY_TYPES = {
+  normal: {
+    id: 'normal', label: '🔑 Chave Normal', color: '#f5c842',
+    desc: 'Chave padrão encontrada na mina',
+    table: [
+      { label:'Comum',   chance:65,  color:'#aaa',    reward: () => ({ coins: Math.floor(100 + Math.random()*400),   gems: Math.floor(5+Math.random()*15) }) },
+      { label:'Raro',    chance:22,  color:'#4488ff', reward: () => ({ coins: Math.floor(500+Math.random()*1500),    gems: Math.floor(25+Math.random()*50) }) },
+      { label:'Épico',   chance:10,  color:'#c97cf5', reward: () => ({ coins: Math.floor(2000+Math.random()*5000),   gems: Math.floor(100+Math.random()*150) }) },
+      { label:'Lendário',chance:2.5, color:'#f5c842', reward: () => ({ coins: Math.floor(10000+Math.random()*20000), gems: Math.floor(500+Math.random()*700), booster:1 }) },
+      { label:'Porrete', chance:0.5, color:'#ffaa44', reward: () => ({ porrete1:1 }) },
+    ]
+  },
+  rubi: {
+    id: 'rubi', label: '💠 Chave de Rubi', color: '#e84393',
+    desc: 'Obtida na Gaiola — recompensas de Rubi',
+    table: [
+      { label:'Rubi Pequeno', chance:50,  color:'#e84393', reward: () => ({ rubi: Math.floor(50+Math.random()*100), gems: Math.floor(10+Math.random()*20) }) },
+      { label:'Rubi Médio',   chance:30,  color:'#ff44aa', reward: () => ({ rubi: Math.floor(200+Math.random()*300), gems: Math.floor(100+Math.random()*150) }) },
+      { label:'Rubi Grande',  chance:15,  color:'#cc00ff', reward: () => ({ rubi: Math.floor(800+Math.random()*700), gems: Math.floor(400+Math.random()*400), coins: Math.floor(5000+Math.random()*10000) }) },
+      { label:'Rubi Épico',   chance:4,   color:'#ff8800', reward: () => ({ rubi: Math.floor(3000+Math.random()*2000), gems: Math.floor(1500+Math.random()*1500), booster:1 }) },
+      { label:'Rubi Lendário',chance:1,   color:'#f5c842', reward: () => ({ rubi: Math.floor(10000+Math.random()*10000), gems: Math.floor(6000+Math.random()*6000), boosterRubi:1 }) },
+    ]
+  },
+  midas: {
+    id: 'midas', label: '✨ Chave Midas', color: '#ffe066',
+    desc: 'Obtida no Tesouro Jackpot — chance de Skin de Picareta!',
+    table: [
+      { label:'Coins Grande',   chance:40.55, color:'#f5c842', reward: () => ({ coins: Math.floor(50000+Math.random()*100000), gems: Math.floor(800+Math.random()*800) }) },
+      { label:'Gemas Grande',   chance:30.35, color:'#48c9e8', reward: () => ({ gems: Math.floor(4000+Math.random()*5000), coins: Math.floor(20000+Math.random()*30000) }) },
+      { label:'Booster+Rubi',  chance:18.6,  color:'#c97cf5', reward: () => ({ booster:2, rubi: Math.floor(500+Math.random()*500), gems: Math.floor(500+Math.random()*500) }) },
+      { label:'Mega Lendário', chance:10.4,  color:'#ff6ab0', reward: () => ({ coins: Math.floor(500000+Math.random()*500000), gems: Math.floor(5000+Math.random()*5000), rubi: Math.floor(2000+Math.random()*2000), booster:3 }) },
+      { label:'🪨 Skin Pedra', chance:0.1,   color:'#88ffcc', reward: () => ({ skin:'stone' }) },
+    ]
+  }
+};
+
+// Returns a human-readable description of a KEY_TYPES table row reward range
+function _keyRewardDesc(rewardFn) {
+  // We read the source of the arrow function to extract ranges
+  const src = rewardFn.toString();
+  const parts = [];
+
+  // coins
+  const coinsM = src.match(/coins:\s*Math\.floor\((\d+)\+Math\.random\(\)\*(\d+)\)/);
+  if (coinsM) {
+    const min = parseInt(coinsM[1]);
+    const max = min + parseInt(coinsM[2]);
+    parts.push(`🪙 ${_fmtRange(min, max)}`);
+  } else if (/coins:\s*Math\.floor\(/.test(src)) {
+    parts.push('🪙 variável');
+  }
+
+  // gems
+  const gemsM = src.match(/gems:\s*Math\.floor\((\d+)\+Math\.random\(\)\*(\d+)\)/);
+  if (gemsM) {
+    const min = parseInt(gemsM[1]);
+    const max = min + parseInt(gemsM[2]);
+    parts.push(`💎 ${_fmtRange(min, max)}`);
+  }
+
+  // rubi
+  const rubiM = src.match(/rubi:\s*Math\.floor\((\d+)\+Math\.random\(\)\*(\d+)\)/);
+  if (rubiM) {
+    const min = parseInt(rubiM[1]);
+    const max = min + parseInt(rubiM[2]);
+    parts.push(`💠 ${_fmtRange(min, max)}`);
+  }
+
+  // booster (fixed value)
+  const boosterM = src.match(/booster:\s*(\d+)/);
+  if (boosterM) parts.push(`⚡ +${boosterM[1]} Booster`);
+
+  // boosterRubi
+  if (/boosterRubi/.test(src)) parts.push('💠⚡ +1 Booster Rubi');
+
+  // porrete
+  if (/porrete1/.test(src)) parts.push('🪵 +1 Porrete');
+
+  // skin
+  if (/skin:/.test(src)) parts.push('🪨 Skin Especial');
+
+  return parts.length ? parts.join('  ') : '—';
+}
+
+function _fmtRange(min, max) {
+  function _abbr(n) {
+    if (n >= 1e6) return (n/1e6).toFixed(n%1e6===0?0:1) + 'M';
+    if (n >= 1e3) return (n/1e3).toFixed(n%1e3===0?0:1) + 'K';
+    return n.toString();
+  }
+  return `${_abbr(min)}–${_abbr(max)}`;
+}
+
+function rollKeyType(typeId) {
+  const kt = KEY_TYPES[typeId] || KEY_TYPES.normal;
+  let r = Math.random() * 100;
+  let acc = 0;
+  for (const row of kt.table) {
+    acc += row.chance;
+    if (r < acc) {
+      return { ...row, reward: row.reward() };
+    }
+  }
+  const last = kt.table[kt.table.length - 1];
+  return { ...last, reward: last.reward() };
+}
+
+function applyKeyReward(reward) {
+  if (reward.coins)      { G.coins += reward.coins; G.totalCoins += reward.coins; }
+  if (reward.gems)       { G.gems  += reward.gems;  G.totalGems  += reward.gems;  }
+  if (reward.rubi)       { G.rubi  = (G.rubi||0) + reward.rubi; G.totalRubi = (G.totalRubi||0) + reward.rubi; }
+  if (reward.booster)    { G.boosters += reward.booster; }
+  if (reward.boosterRubi){ G.rubiBooster = (G.rubiBooster||0) + 1; }
+  if (reward.porrete1)   { if (!G.porretes) G.porretes = [0,0,0,0,0,0,0,0]; G.porretes[0]++; renderPorreteHUD(); }
+  if (reward.skin)       {
+    if (!G.ownedSkins.includes(reward.skin)) {
+      G.ownedSkins.push(reward.skin);
+      showToast(`🎉 SKIN DESBLOQUEADA: ${SKINS_DATA.find(s=>s.id===reward.skin)?.name}!`);
+    }
+  }
+}
+
+function rewardToString(reward) {
+  const parts = [];
+  if (reward.coins)      parts.push(`🪙 +${fmt(reward.coins)}`);
+  if (reward.gems)       parts.push(`💎 +${fmt(reward.gems)}`);
+  if (reward.rubi)       parts.push(`💠 +${fmt(reward.rubi)}`);
+  if (reward.booster)    parts.push(`⚡ +${reward.booster} Booster`);
+  if (reward.boosterRubi) parts.push(`💠⚡ +1 Booster de Rubi!`);
+  if (reward.porrete1)   parts.push(`🪵 +1 Porrete 1`);
+  if (reward.skin)       parts.push(`🪨 SKIN: ${SKINS_DATA.find(s=>s.id===reward.skin)?.name || reward.skin}`);
+  return parts.join('  ') || 'Sem recompensa';
+}
+
+// Legacy rollKey for compatibility
 function rollKey() {
   const r = Math.random() * 100;
   let rarity, color, reward;
@@ -3212,85 +3412,144 @@ function rollKey() {
   } else if (r < 97) {
     rarity = 'Épico'; color = 'epic';
     reward = { coins: Math.floor(2000+Math.random()*5000), gems: Math.floor(20+Math.random()*50) };
-  } else {
+  } else if (r < 99.5) {
     rarity = 'Lendário'; color = 'legendary';
     reward = { coins: Math.floor(10000+Math.random()*20000), gems: Math.floor(100+Math.random()*200), booster:1 };
+  } else {
+    rarity = 'Porrete'; color = 'epic';
+    reward = {};
+    reward.porrete1 = 1;
   }
-  // Always give a chance of Porrete 1 (8% chance — harder to get)
-  if (Math.random() < 0.08) reward.porrete1 = 1;
   return { rarity, color, reward };
 }
 
+// ============================================================
+// KEYS
+// ============================================================
 function openKeys() {
-  document.getElementById('keys-count-btn').textContent = fmt(G.keys);
-  document.getElementById('key-all-result').style.display = 'none';
-  document.getElementById('key-result').innerHTML = G.keys > 0
-    ? '<div style="color:var(--muted);text-align:center;font-size:13px">Escolha uma opção acima.</div>'
-    : '<div style="color:var(--hp);text-align:center">Sem keys! Use as máquinas para ganhar.</div>';
+  renderKeyModal();
   openModal('modal-key');
-  updateHUD();
 }
 
-function openOneKey() {
-  if (G.keys <= 0) { showToast('Sem keys!'); return; }
-  G.keys--;
-  const { rarity, color, reward } = rollKey();
-  G.coins += reward.coins; G.totalCoins += reward.coins;
-  G.gems  += reward.gems;  G.totalGems  += reward.gems;
-  if (reward.booster) G.boosters++;
-  if (reward.porrete1) {
-    if (!G.porretes) G.porretes = [0,0,0,0,0,0,0,0];
-    G.porretes[0]++;
-    renderPorreteHUD();
-  }
+function renderKeyModal() {
+  const modal = document.getElementById('modal-key');
+  if (!modal) return;
+  const inner = modal.querySelector('.modal');
+  if (!inner) return;
+  inner.innerHTML = `
+    <button class="modal-close" onclick="closeModal('modal-key')">×</button>
+    <h2>🔑 Keys</h2>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">
+      <button class="hud-btn key-tab-btn active" id="ktab-normal" onclick="setKeyTab('normal')" style="border-color:#f5c842;color:#f5c842">🔑 Normal (${fmt(G.keys)})</button>
+      <button class="hud-btn key-tab-btn" id="ktab-rubi" onclick="setKeyTab('rubi')" style="border-color:#e84393;color:#e84393">💠 Rubi (${fmt(G.rubiKeys||0)})</button>
+      <button class="hud-btn key-tab-btn" id="ktab-midas" onclick="setKeyTab('midas')" style="border-color:#ffe066;color:#ffe066">✨ Midas (${fmt(G.midasKeys||0)})</button>
+    </div>
+    <div id="key-tab-content"></div>
+    <div id="key-result" style="margin-top:10px"></div>
+    <div id="key-all-result" style="display:none;margin-top:10px;"></div>
+  `;
+  setKeyTab('normal');
+}
+
+let _currentKeyTab = 'normal';
+function setKeyTab(typeId) {
+  _currentKeyTab = typeId;
+  document.querySelectorAll('.key-tab-btn').forEach(b => b.classList.remove('active'));
+  const tb = document.getElementById('ktab-' + typeId);
+  if (tb) tb.classList.add('active');
+
+  const kt = KEY_TYPES[typeId];
+  const qty = typeId === 'normal' ? G.keys : typeId === 'rubi' ? (G.rubiKeys||0) : (G.midasKeys||0);
+  const c = document.getElementById('key-tab-content');
+  if (!c) return;
+
+  // Build reward table
+  let tableRows = kt.table.map(row => {
+    const rewardDesc = _keyRewardDesc(row.reward);
+    return `
+    <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
+      <div style="width:8px;height:8px;border-radius:50%;background:${row.color};flex-shrink:0"></div>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:12px;font-weight:700;color:${row.color}">${row.label}</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:1px">${rewardDesc}</div>
+      </div>
+      <div style="font-size:11px;color:var(--muted);text-align:right;white-space:nowrap">${row.chance}%</div>
+    </div>`;
+  }).join('');
+
+  c.innerHTML = `
+    <div style="background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:10px">
+      <div style="font-size:12px;color:var(--muted);margin-bottom:6px">${kt.desc}</div>
+      <div style="font-size:12px;font-weight:700;color:${kt.color};margin-bottom:4px">📋 Tabela de Recompensas</div>
+      ${tableRows}
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap">
+      <button class="btn-buy" onclick="openOneKeyType('${typeId}')" ${qty<=0?'disabled':''}>🔑 Abrir 1 (${fmt(qty)} disponíveis)</button>
+      <button class="btn-buy" style="border-color:#48c9e8;color:#48c9e8" onclick="openAllKeysType('${typeId}')" ${qty<=0?'disabled':''}>🔑 Abrir Todas</button>
+    </div>
+  `;
+  document.getElementById('key-result').innerHTML = '';
+  document.getElementById('key-all-result').style.display = 'none';
+}
+
+function openOneKey() { openOneKeyType('normal'); }
+function openOneKeyType(typeId) {
+  const qtyKey = typeId === 'normal' ? 'keys' : typeId === 'rubi' ? 'rubiKeys' : 'midasKeys';
+  if ((G[qtyKey]||0) <= 0) { showToast('Sem keys desse tipo!'); return; }
+  G[qtyKey]--;
+  const result = rollKeyType(typeId);
+  applyKeyReward(result.reward);
+  const rewardStr = rewardToString(result.reward);
   document.getElementById('key-all-result').style.display = 'none';
   document.getElementById('key-result').innerHTML = `
-    <div style="font-size:40px">🔑</div>
-    <div class="key-rarity ${color}">${rarity}!</div>
-    <div style="font-size:14px;margin-top:8px">
-      🪙 +${fmt(reward.coins)} coins<br>
-      💎 +${reward.gems} gemas
-      ${reward.booster ? '<br>⚡ +1 Booster Lendário!' : ''}
-      ${reward.porrete1 ? '<br>🪵 +1 Porrete 1!' : ''}
+    <div style="background:var(--panel2);border:1px solid ${result.color};border-radius:8px;padding:12px;text-align:center">
+      <div style="font-size:32px">🔑</div>
+      <div style="font-size:18px;font-weight:900;color:${result.color};margin:6px 0">${result.label}!</div>
+      <div style="font-size:13px;color:var(--text)">${rewardStr}</div>
     </div>`;
-  document.getElementById('keys-count-btn').textContent = fmt(G.keys);
+  setKeyTab(typeId);
   updateHUD(); autoSave();
 }
 
-function openAllKeys() {
-  if (G.keys <= 0) { showToast('Sem keys!'); return; }
-  let totalCoins = 0, totalGems = 0, totalBoosters = 0, totalPorretes = 0;
-  const counts = { Comum:0, Raro:0, Épico:0, Lendário:0 };
-  while (G.keys > 0) {
-    G.keys--;
-    const { rarity, reward } = rollKey();
-    totalCoins += reward.coins;
-    totalGems  += reward.gems;
-    if (reward.booster) totalBoosters++;
-    if (reward.porrete1) { totalPorretes++; }
-    counts[rarity]++;
+function openAllKeys() { openAllKeysType('normal'); }
+function openAllKeysType(typeId) {
+  const qtyKey = typeId === 'normal' ? 'keys' : typeId === 'rubi' ? 'rubiKeys' : 'midasKeys';
+  if ((G[qtyKey]||0) <= 0) { showToast('Sem keys desse tipo!'); return; }
+  const kt = KEY_TYPES[typeId];
+  const counts = {};
+  kt.table.forEach(r => counts[r.label] = 0);
+  let totalCoins = 0, totalGems = 0, totalRubi = 0, totalBoosters = 0, totalRubiBooster = 0, totalPorrete = 0, skinGot = null;
+  while ((G[qtyKey]||0) > 0) {
+    G[qtyKey]--;
+    const result = rollKeyType(typeId);
+    counts[result.label] = (counts[result.label]||0) + 1;
+    applyKeyReward(result.reward);
+    if (result.reward.coins) totalCoins += result.reward.coins;
+    if (result.reward.gems)  totalGems  += result.reward.gems;
+    if (result.reward.rubi)  totalRubi  += result.reward.rubi;
+    if (result.reward.booster) totalBoosters += result.reward.booster;
+    if (result.reward.boosterRubi) totalRubiBooster++;
+    if (result.reward.porrete1) totalPorrete++;
+    if (result.reward.skin) skinGot = result.reward.skin;
   }
-  G.coins += totalCoins; G.totalCoins += totalCoins;
-  G.gems  += totalGems;  G.totalGems  += totalGems;
-  G.boosters += totalBoosters;
-  if (totalPorretes > 0) {
-    if (!G.porretes) G.porretes = [0,0,0,0,0,0,0,0];
-    G.porretes[0] += totalPorretes;
-    renderPorreteHUD();
-  }
-  document.getElementById('key-result').innerHTML = '<div style="color:var(--gem);font-weight:800;font-size:15px">🔑 Todas as keys abertas!</div>';
-  document.getElementById('key-all-result').style.display = 'block';
-  document.getElementById('key-all-result').innerHTML = `
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:13px;">
-      <div class="shop-row" style="margin:0"><div class="s-info"><div class="s-name common">Comum</div></div><div style="font-weight:800">${counts['Comum']}x</div></div>
-      <div class="shop-row" style="margin:0"><div class="s-info"><div class="s-name rare">Raro</div></div><div style="font-weight:800">${counts['Raro']}x</div></div>
-      <div class="shop-row" style="margin:0"><div class="s-info"><div class="s-name epic">Épico</div></div><div style="font-weight:800">${counts['Épico']}x</div></div>
-      <div class="shop-row" style="margin:0"><div class="s-info"><div class="s-name legendary">Lendário</div></div><div style="font-weight:800">${counts['Lendário']}x</div></div>
-    </div>
-    <div style="margin-top:10px;text-align:center;font-size:14px;">
-      🪙 +${fmt(totalCoins)}&nbsp;&nbsp;💎 +${fmt(totalGems)}${totalBoosters > 0 ? '&nbsp;&nbsp;⚡ +'+totalBoosters : ''}${totalPorretes > 0 ? '&nbsp;&nbsp;🪵 +'+totalPorretes+' Porrete 1' : ''}
-    </div>`;
-  document.getElementById('keys-count-btn').textContent = fmt(0);
+  document.getElementById('key-result').innerHTML = `<div style="color:var(--gem);font-weight:800;font-size:15px">🔑 Todas as keys abertas!</div>`;
+  const summaryRows = Object.entries(counts).map(([lbl,cnt]) => {
+    const row = kt.table.find(r => r.label === lbl);
+    return `<div class="shop-row" style="margin:0"><div class="s-info"><div class="s-name" style="color:${row?.color||'#fff'}">${lbl}</div></div><div style="font-weight:800">${cnt}x</div></div>`;
+  }).join('');
+  const totParts = [];
+  if (totalCoins)      totParts.push(`🪙 +${fmt(totalCoins)}`);
+  if (totalGems)       totParts.push(`💎 +${fmt(totalGems)}`);
+  if (totalRubi)       totParts.push(`💠 +${fmt(totalRubi)}`);
+  if (totalBoosters)   totParts.push(`⚡ +${totalBoosters}`);
+  if (totalRubiBooster) totParts.push(`💠⚡ +${totalRubiBooster} Booster Rubi`);
+  if (totalPorrete)    totParts.push(`🪵 +${totalPorrete} Porrete`);
+  if (skinGot)         totParts.push(`🪨 SKIN: ${SKINS_DATA.find(s=>s.id===skinGot)?.name}`);
+  const allRes = document.getElementById('key-all-result');
+  allRes.style.display = 'block';
+  allRes.innerHTML = `<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:13px;">${summaryRows}</div>
+    <div style="margin-top:10px;text-align:center;font-size:14px;">${totParts.join('&nbsp;&nbsp;')}</div>`;
+  setKeyTab(typeId);
   updateHUD(); autoSave();
 }
 
@@ -3307,28 +3566,75 @@ function activateBooster() {
   updateHUD();
   updateBoosterUI();
 }
+
+function activateRubiBooster() {
+  if ((G.rubiBooster||0) <= 0) { showToast('Sem Boosters de Rubi! Abra Chaves de Rubi Lendárias.'); return; }
+  if (G.rubiBoosterActive) { showToast('Booster de Rubi já ativo!'); return; }
+  G.rubiBooster--;
+  G.rubiBoosterActive = true;
+  G.rubiBoosterTimer = 300; // 5 min
+  showToast('💠⚡ Booster de Rubi ativado! +100% Rubi por 5 min!');
+  updateHUD();
+  updateBoosterUI();
+}
 function tickBooster() {
-  if (!G.boosterActive) return;
-  G.boosterTimer--;
-  if (G.boosterTimer <= 0) {
-    G.boosterActive = false;
-    G.boosterTimer = 0;
-    showToast('⚡ Booster expirou!');
+  if (G.boosterActive) {
+    G.boosterTimer--;
+    if (G.boosterTimer <= 0) {
+      G.boosterActive = false;
+      G.boosterTimer = 0;
+      showToast('⚡ Booster expirou!');
+      // Auto-booster
+      if (G.autoBooster && G.prestiges >= 1 && G.boosters > 0) {
+        setTimeout(() => {
+          G.boosters--;
+          G.boosterActive = true;
+          G.boosterTimer = 240;
+          showToast('⚡ Auto-Booster ativado!');
+          updateHUD(); updateBoosterUI();
+        }, 500);
+        return;
+      }
+    }
+  }
+  if (G.rubiBoosterActive) {
+    G.rubiBoosterTimer = (G.rubiBoosterTimer||0) - 1;
+    if (G.rubiBoosterTimer <= 0) {
+      G.rubiBoosterActive = false;
+      G.rubiBoosterTimer = 0;
+      showToast('💠⚡ Booster de Rubi expirou!');
+    }
   }
   updateBoosterUI();
 }
 function updateBoosterUI() {
   const bi = document.getElementById('booster-info');
+  const rbi = document.getElementById('rubi-booster-info');
   const hbs = document.getElementById('hud-booster-stat');
   const hbt = document.getElementById('hud-booster-time');
+  let html = '';
   if (G.boosterActive) {
     const m = Math.floor(G.boosterTimer/60), s = G.boosterTimer%60;
-    bi.innerHTML = `<span id="booster-timer">⚡ Ativo: ${m}:${s.toString().padStart(2,'0')}</span>`;
+    html += `<div>⚡ Booster: <b style="color:#f5c842">${m}:${s.toString().padStart(2,'0')}</b></div>`;
     hbs.style.display = 'flex';
     hbt.textContent = `${m}:${s.toString().padStart(2,'0')}`;
   } else {
-    bi.innerHTML = G.boosters > 0 ? `${G.boosters} booster(s) disponível` : 'Sem booster ativo.';
+    const autoLabel = (G.autoBooster && G.prestiges >= 1) ? ' <span style="color:#6edc7a;font-size:10px">🔁 Auto</span>' : '';
+    html += `<div>⚡ ${G.boosters} booster(s)${autoLabel}</div>`;
     hbs.style.display = 'none';
+  }
+  bi.innerHTML = html;
+
+  // Rubi booster — separate panel
+  if (rbi) {
+    if (G.rubiBoosterActive) {
+      const rm = Math.floor((G.rubiBoosterTimer||0)/60), rs = (G.rubiBoosterTimer||0)%60;
+      rbi.innerHTML = `<div style="color:#ff66bb;font-weight:800">💠⚡ ATIVO — <b>${rm}:${rs.toString().padStart(2,'0')}</b> restante</div>`;
+    } else if ((G.rubiBooster||0) > 0) {
+      rbi.innerHTML = `<div style="color:#e84393">💠 ${G.rubiBooster} Booster(s) disponível(is)</div>`;
+    } else {
+      rbi.innerHTML = `<div style="color:#6a3050">Sem Booster de Rubi.<br><span style="font-size:10px">Abra Chaves de Rubi Lendárias!</span></div>`;
+    }
   }
 }
 
@@ -3337,14 +3643,14 @@ function updateBoosterUI() {
 // ============================================================
 function renderSkinsModal() {
   const c = document.getElementById('skins-content');
-  c.innerHTML = '<div class="skin-grid">' +
+  c.innerHTML = '<div style="font-size:12px;color:var(--muted);margin-bottom:10px">Todas as skins multiplicam 🪙 Coins e 💎 Gemas. A 1ª skin também pode ser obtida via Chave Midas!</div><div class="skin-grid">' +
     SKINS_DATA.map(s => {
       const owned = G.ownedSkins.includes(s.id);
       const eq = G.equippedSkin === s.id;
       return `<div class="skin-card ${eq?'equipped':''}" onclick="skinAction('${s.id}',${owned})">
         <div class="skin-icon">${s.icon}</div>
         <div class="skin-name">${s.name}</div>
-        <div class="skin-bonus">${s.bonus}</div>
+        <div class="skin-bonus" style="color:#f5c842">🪙×${s.coinVal} 💎×${s.gemVal}</div>
         <div class="skin-cost">${eq?'✅ Equipada': owned?'🟢 Equipar':`🪙 ${fmt(s.cost)}`}</div>
       </div>`;
     }).join('') + '</div>';
@@ -3578,7 +3884,7 @@ function tickAFK() {
       spawnFloat('🔴 LASER!', window.innerWidth/2, window.innerHeight/3, '#ff7700');
     }
     // LIGHTNING
-    if (G.lightning > 0 && !G.enchDisabled?.lightning && Math.random() < G.lightning * 0.003) {
+    if (G.lightning > 0 && !G.enchDisabled?.lightning && Math.random() < G.lightning * 0.0006) {
       const lrow = Math.floor(idx / G.gridSize), lcol = idx % G.gridSize;
       for (let dr = -2; dr <= 2; dr++) {
         for (let dc = -2; dc <= 2; dc++) {
@@ -3602,16 +3908,23 @@ function tickAFK() {
     }
     // JACKPOT TESOURO
     if (G.jackpot > 0 && !G.enchDisabled?.jackpot && Math.random() < G.jackpot * 0.00015) {
-      G.keys += 10; G.totalJackpots++;
-      spawnFloat(`💎 TESOURO! +10 🔑`, window.innerWidth/2, window.innerHeight/2, '#f5c842');
-      showToast(`💎 TESOURO ENCONTRADO! +10 🔑 Keys!`);
+      G.totalJackpots++;
+      if (Math.random() < 0.0001) {
+        G.midasKeys = (G.midasKeys||0) + 1;
+        spawnFloat(`✨ CHAVE MIDAS!`, window.innerWidth/2, window.innerHeight/2, '#ffe066');
+        showToast(`✨ CHAVE MIDAS! Raridade extrema!`);
+      } else {
+        G.keys += 10; 
+        spawnFloat(`💎 TESOURO! +10 🔑`, window.innerWidth/2, window.innerHeight/2, '#f5c842');
+        showToast(`💎 TESOURO ENCONTRADO! +10 🔑 Keys!`);
+      }
     }
     // FRENZY
     if (!G.frenzyActive && G.frenzy > 0 && !G.enchDisabled?.frenzy && Math.random() < G.frenzy * 0.002) {
       activateFrenzy();
     }
     // NUCLEAR
-    if (G.nuclear > 0 && !G.enchDisabled?.nuclear && Math.random() < G.nuclear * 0.001) {
+    if (G.nuclear > 0 && !G.enchDisabled?.nuclear && Math.random() < G.nuclear * 0.000001) {
       activateNuclear();
     }
 
@@ -4213,8 +4526,13 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
+// IDs dos brainrots novos (pagam em 1h; antigos pagam em 40min)
+const NEW_BRAINROT_IDS = new Set(["gamba_pazzo","lumacone","pappagallino","formicaio","topolino_bro","farfalline","riccio_loco","tacchino_pro","squalo_volante","corvo_misterioso","cervo_ribelle","struzzo_folle","cigno_nero_ok","fenicottero_paz","kiwi_brainrot","axolotl_furia","mantide_reale","pipistrello_re","tortugo_lento","cobra_real","bufalo_selvagem","alce_cosmico","raggio_solare","tempesta_blu","vulcano_vivo","aurora_boreale","arcobaleno_re","titano_oscuro","ombra_eterna","re_del_vuoto","guardiano_chaos","iperuranio","principio_primo"]);
 // Brainrot passive coin income
 // Sempre acumula em brainrotPending — o jogador precisa coletar manualmente clicando no botão
+// Antigos: pagam em 40min (2400s). Novos: pagam em 1h (3600s).
+// TICK_MS = 2000. paySeconds / (TICK_MS/1000) = número de ticks para pagar tudo.
+const BRAINROT_TICK_MS = 2000;
 setInterval(() => {
   if (!G.brainrotSlots) return;
 
@@ -4225,20 +4543,31 @@ setInterval(() => {
   const boosterMult = G.boosterActive ? 1.4 : 1;
   const rebirthM = getRebirthMult().coin;
   const BRAINROT_COIN_BASE = { comum: 4000, raro: 20000, 'épico': 120000, 'lendário': 800000, 'mítico': 6000000, celestial: 45000000 };
+  // Limite de acúmulo por slot (payTime em ticks)
+  const OLD_PAY_TICKS = 2400 / (BRAINROT_TICK_MS / 1000); // 40min / 2s = 1200 ticks
+  const NEW_PAY_TICKS = 3600 / (BRAINROT_TICK_MS / 1000); // 60min / 2s = 1800 ticks
+  // Cap total de pending (soma dos caps de cada slot)
+  let totalCap = 0;
   for (const slotId of G.brainrotSlots) {
     if (!slotId) continue;
     const b = BRAINROT_DATA.find(b => b.id === slotId);
     if (!b) continue;
     const base = BRAINROT_COIN_BASE[b.rarity] || 1000;
-    totalCoinsPerTick += Math.floor(base * b.coinMult * prestigeMult * rankMult * vipM * boosterMult * rebirthM);
+    const coinPerTick = Math.floor(base * b.coinMult * prestigeMult * rankMult * vipM * boosterMult * rebirthM);
+    totalCoinsPerTick += coinPerTick;
+    const payTicks = NEW_BRAINROT_IDS.has(slotId) ? NEW_PAY_TICKS : OLD_PAY_TICKS;
+    totalCap += coinPerTick * payTicks;
   }
   if (totalCoinsPerTick > 0) {
     // Sempre vai para pending — jogador precisa coletar manualmente!
-    G.brainrotPending = (G.brainrotPending || 0) + totalCoinsPerTick;
+    const current = G.brainrotPending || 0;
+    if (current < totalCap) {
+      G.brainrotPending = Math.min(current + totalCoinsPerTick, totalCap);
+    }
     updateBrainrotPendingUI();
     autoSave();
   }
-}, 2000);
+}, BRAINROT_TICK_MS);
 
 function collectBrainrotPending() {
   const amount = Math.floor(G.brainrotPending || 0);
@@ -4281,9 +4610,7 @@ setInterval(saveGame, 5000);
 // ============================================================
 function activateNuclear() {
   if (!G.nuclear || G.nuclear <= 0) { showToast('☢️ Você não tem o encantamento Nuclear!'); return; }
-  const rubiCost = Math.ceil(15 + G.nuclear * 0.01);
-  if ((G.rubi||0) < rubiCost) { return; } // sem Rubi suficiente — ignora silenciosamente (chance trigger)
-  G.rubi -= rubiCost;
+  // Nuclear NÃO gasta Rubi ao ativar — é grátis quando trigga por chance!
   let count = 0;
   G.blocks.forEach((b, i) => {
     if (b) { collectBlock(b, null, i); G.blocks[i] = null; G.blocksMined++; G.totalBlocks++; count++; }
@@ -4824,9 +5151,14 @@ function renderVIPModal() {
       + '<option value="vip2">💎 VIP II — +15% coins & gemas</option>'
       + '<option value="vip3">🌟 VIP III — +20% coins & gemas</option>'
       + '<option value="vip4">🔥 VIP IV — +25% coins & gemas</option>'
+      + '<option value="midas">✨ Midas — Chave Midas Premium</option>'
       + '</select>'
-      + '<button class="btn-buy" style="border-color:#ff8800;color:#ffaa44;background:linear-gradient(135deg,#1a0800,#3a1a00)" onclick="adminGenerateKey()">⚡ Gerar Key VIP</button>'
-      + '<div id="adm-key-result" style="font-size:13px;font-family:monospace;font-weight:800;color:#6edc7a;word-break:break-all;min-height:20px;background:var(--panel2);padding:6px 10px;border-radius:6px;border:1px solid var(--border)"></div>'
+      + '<div style="display:flex;align-items:center;gap:6px;margin-top:2px">'
+      + '<label style="font-size:11px;color:#ffaa44;font-weight:700;white-space:nowrap">Qtd (1-300):</label>'
+      + '<input id="adm-key-qty" type="number" min="1" max="300" value="1" style="flex:1;background:var(--panel2);border:1px solid #8b5000;color:var(--text);padding:6px 10px;border-radius:6px;font-size:12px">'
+      + '</div>'
+      + '<button class="btn-buy" style="border-color:#ff8800;color:#ffaa44;background:linear-gradient(135deg,#1a0800,#3a1a00)" onclick="adminGenerateKey()">⚡ Gerar Keys</button>'
+      + '<div id="adm-key-result" style="font-size:11px;font-family:monospace;font-weight:800;color:#6edc7a;word-break:break-all;min-height:20px;background:var(--panel2);padding:6px 10px;border-radius:6px;border:1px solid var(--border);max-height:200px;overflow-y:auto;white-space:pre-wrap"></div>'
       + '</div></details>';
   }
 }
@@ -4843,9 +5175,17 @@ async function tryActivateVIP() {
   }
   const result = await window.redeemSingleKey(key);
   if (result.ok) {
+    // Midas key gives a Midas Key item, not VIP
+    if (result.type === 'midas') {
+      G.midasKeys = (G.midasKeys || 0) + 1;
+      saveGame(); updateHUD(); closeModal('modal-vip');
+      showToast('✨ CHAVE MIDAS RESGATADA! +1 Midas Key!');
+      if (status) status.textContent = '✅ Chave Midas adicionada!';
+      return;
+    }
     G.vipActive = true;
     // Detect tier from key type
-    const _typeToTier = { 'vip': 1, 'vip1': 1, 'vip2': 2, 'vip3': 3, 'vip4': 4 };
+    const _typeToTier = { 'vip': 1, 'vip1': 1, 'vip2': 2, 'vip3': 3, 'vip4': 4, 'midas': 0 };
     G.vipTier = _typeToTier[result.type] || 1;
     const _tierLabels = ['', '+10%', '+15%', '+20%', '+25%'];
     const _tierNames  = ['', 'VIP I', 'VIP II', 'VIP III', 'VIP IV'];
@@ -4864,13 +5204,16 @@ async function adminGenerateKey() {
   const p = (document.getElementById('adm-pass')?.value || '').trim();
   const sel = document.getElementById('adm-key-type');
   const keyType = sel ? sel.value : 'vip1';
+  const qtyEl = document.getElementById('adm-key-qty');
+  const qty = qtyEl ? parseInt(qtyEl.value) || 1 : 1;
   const out = document.getElementById('adm-key-result');
-  if (out) out.textContent = '⏳ Gerando...';
+  if (out) out.textContent = `⏳ Gerando ${qty} key(s)...`;
   if (!window.adminCreateKey) { if (out) out.textContent = '❌ Firebase não pronto'; return; }
-  const result = await window.adminCreateKey(u, p, keyType);
+  const result = await window.adminCreateKey(u, p, keyType, qty);
   if (result.ok) {
-    if (out) out.textContent = result.key;
-    showToast('✅ Key gerada: ' + result.key);
+    const keyList = result.keys || [result.key];
+    if (out) out.textContent = keyList.join('\n');
+    showToast(`✅ ${keyList.length} key(s) gerada(s)!`);
   } else {
     if (out) out.textContent = result.msg;
     showToast(result.msg);
@@ -5306,7 +5649,7 @@ function doRebirth(tier) {
       <div style="font-size:18px;font-weight:900;color:#ff6ab0;margin-bottom:12px">Confirmar Rebirth ${tier}?</div>
       <div style="font-size:13px;color:#f5c842;margin-bottom:6px">Custo: 🪙 ${fmt(t.costCoins)} + 💠 ${t.costRubi} Rubi</div>
       <div style="font-size:13px;color:#6edc7a;margin-bottom:6px">Bônus: ×${t.coinMult.toFixed(2)} Coins e Gemas PERMANENTE</div>
-      <div style="font-size:12px;color:#e85c5c;margin-bottom:16px">⚠️ Vai resetar: rank, coins, picareta e seus Brainrots (inventário + slots)</div>
+      <div style="font-size:12px;color:#e85c5c;margin-bottom:16px">⚠️ Vai resetar: coins e seus Brainrots (inventário + slots). Rank, picareta e gemas ficam!</div>
       <div style="display:flex;gap:10px;justify-content:center">
         <button onclick="confirmRebirth()" style="flex:1;padding:12px;border-radius:8px;font-weight:900;font-size:14px;cursor:pointer;
           background:linear-gradient(135deg,#3a0030,#8a0060);border:2px solid #e84393;color:#ff6ab0;">
@@ -5331,16 +5674,15 @@ function confirmRebirth() {
   G.rubi  -= t.costRubi;
   G.rebirthCount = tier;
   G.rebirthMult  = t.coinMult;
-  G.rank = 1; G.xp = 0;
+  // Rebirth resetar APENAS: brainrots (inventário + slots) e coins
+  // Rank, picareta, gemas, rubi e todo o resto NÃO resetam!
   G.coins = 0;
-  G.pickIndex = 0; G.pickHP = 0;
-  // Rebirth da Gaiola: reseta apenas brainrots do inventário
   G.brainrotInventory = [];
   G.brainrotSlots = [null,null,null,null,null,null,null,null];
   G.brainrotPending = 0;
   _rebirthPendingTier = 0;
   spawnFloat('♻️ REBIRTH ' + tier + '!', window.innerWidth/2, window.innerHeight/2, '#ff6ab0');
-  showToast('♻️ Rebirth ' + tier + ' completo! ×' + t.coinMult.toFixed(2) + ' permanente! Brainrots resetados!');
+  showToast('♻️ Rebirth ' + tier + ' completo! ×' + t.coinMult.toFixed(2) + ' permanente! Coins e Brainrots resetados!');
   updateHUD(); updateRankUI(); updatePickUI();
   renderBrainrotSlots();
   renderRebirthModal();
@@ -5567,11 +5909,17 @@ function attackMob(idx) {
 
   if (state.hp <= 0) {
     state.respawnAt = now + boss.respawnSecs * 1000;
-    G.rubi = (G.rubi || 0) + boss.rubiDrop;
-    G.totalRubi = (G.totalRubi || 0) + boss.rubiDrop;
-    spawnFloat(`+${fmt(boss.rubiDrop)} 💠`, window.innerWidth/2, window.innerHeight/2 - 40, '#e84393');
-    showToast(`⚔️ ${boss.name} #${idx+1} derrotado! +${boss.rubiDrop} 💠 +${fmt(boss.xpDrop)} XP`);
-    gainXP(boss.xpDrop);
+    const rubiMult = G.rubiBoosterActive ? 2 : 1;
+    const rubiGain = boss.rubiDrop * rubiMult;
+    G.rubi = (G.rubi || 0) + rubiGain;
+    G.totalRubi = (G.totalRubi || 0) + rubiGain;
+    spawnFloat(`+${fmt(rubiGain)} 💠${rubiMult>1?' ×2!':''}`, window.innerWidth/2, window.innerHeight/2 - 40, '#e84393');
+    showToast(`⚔️ ${boss.name} #${idx+1} derrotado! +${rubiGain} 💠`);
+    // Chance de ganhar Chave de Rubi (tier 3+: 5% por tier acima de 2)
+    if (tier >= 3 && Math.random() < (tier - 2) * 0.05) {
+      G.rubiKeys = (G.rubiKeys||0) + 1;
+      showToast(`💠🔑 Chave de Rubi obtida!`);
+    }
     updateHUD();
   } else {
     spawnFloat(`-${fmt(dmg)}`, window.innerWidth/2, window.innerHeight/2 - 20, '#e85c5c');
