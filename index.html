@@ -343,6 +343,23 @@ footer{background:var(--navy-800);border-top:1px solid var(--line);padding:44px 
 .tagline b{color:#fff;font-weight:600}
 
 /* ---------- Google Empresas ---------- */
+.gjobs-panel{
+  background:var(--navy-800);border:1px solid var(--line);border-radius:var(--radius);
+  padding:20px 22px;margin-bottom:18px;
+}
+.gjobs-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:space-between}
+.gjobs-head h3{font-family:"Sora";font-size:16.5px;display:flex;align-items:center;gap:9px}
+.gjobs-head p{color:var(--muted);font-size:13px}
+.gjobs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;margin-top:14px}
+.gjobs-item{
+  display:flex;align-items:center;gap:10px;padding:11px 13px;border-radius:10px;
+  background:var(--navy-700);border:1px solid var(--line);font-size:13.5px;font-weight:500;
+  transition:border-color .15s,background .15s;
+}
+.gjobs-item:hover{border-color:rgba(147,184,255,.42);background:rgba(140,175,225,.08)}
+.gjobs-item .ic{font-size:16px;flex-shrink:0}
+.gjobs-item .go{margin-left:auto;color:var(--muted);font-size:13px}
+
 .gbp-card{
   margin-top:34px;display:flex;flex-wrap:wrap;gap:20px;align-items:center;justify-content:space-between;
   background:linear-gradient(135deg,var(--navy-700),var(--navy-800));
@@ -611,6 +628,21 @@ footer{background:var(--navy-800);border-top:1px solid var(--line);padding:44px 
     </aside>
 
     <div>
+      <div class="gjobs-panel">
+        <div class="gjobs-head">
+          <h3>
+            <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+              <path fill="#4285F4" d="M23 12.3c0-.8-.1-1.6-.2-2.3H12v4.5h6.2a5.3 5.3 0 0 1-2.3 3.5v2.9h3.7c2.2-2 3.4-5 3.4-8.6"/>
+              <path fill="#34A853" d="M12 23.5c3.1 0 5.7-1 7.6-2.8l-3.7-2.9c-1 .7-2.3 1.1-3.9 1.1-3 0-5.6-2-6.5-4.8H1.7v3A11.5 11.5 0 0 0 12 23.5"/>
+              <path fill="#FBBC05" d="M5.5 14.1a6.9 6.9 0 0 1 0-4.4v-3H1.7a11.5 11.5 0 0 0 0 10.4z"/>
+              <path fill="#EA4335" d="M12 4.9c1.7 0 3.2.6 4.4 1.7l3.3-3.3A11.5 11.5 0 0 0 1.7 6.7l3.8 3a6.9 6.9 0 0 1 6.5-4.8"/>
+            </svg>
+            Vagas ao vivo no Google, por categoria
+          </h3>
+          <p>Direto do Google para Empregos — atualizado o tempo todo, em São Paulo.</p>
+        </div>
+        <div class="gjobs-grid" id="gjobsGrid"></div>
+      </div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
         <p style="color:var(--muted);font-size:14px" id="resultCount"></p>
         <select id="fSort" onchange="render()" style="background:var(--navy-800);color:var(--ink);border:1px solid var(--line);border-radius:9px;padding:9px 12px;font-size:13.5px">
@@ -1006,6 +1038,56 @@ function loadJobs(){
   }catch(e){ JOBS = []; }
   if(!Array.isArray(JOBS)) JOBS = [];
 }
+
+/* ====== Vagas reais em São Paulo, buscadas hoje na web ======
+   Só entram aqui categorias onde achei um anúncio individual com fonte
+   confiável e link direto — nas demais, o painel "Vagas ao vivo no Google"
+   continua sendo o caminho, porque não achei um anúncio único e confiável
+   pra travar no site (essas listas mudam e saem do ar toda hora). */
+const VAGAS_REAIS_SP = [
+  {t:"Coordenador de Marketing", c:"Incorporadora imobiliária nacional", cat:"Marketing e Comunicação",
+   tipo:"CLT", mod:"Remoto", loc:"São Paulo, SP", pay:"A combinar", unit:"",
+   desc:"Empresa de incorporação imobiliária de atuação nacional busca profissional para coordenar a execução das estratégias de marketing, integrando ações online e offline aos objetivos comerciais.",
+   req:["Coordenar campanhas de geração de leads e lançamentos imobiliários","Alinhar ações de marketing com times comerciais","Gerenciar fornecedores e parceiros de campanha"],
+   ben:["A combinar com a empresa"], fonte:"Robert Half", url:"https://www.roberthalf.com/br/pt/vagas/sao-paulo/head-de-marketing"},
+
+  {t:"Especialista de TI", c:"Empresa de desenvolvimento de jogos online", cat:"Tecnologia e TI",
+   tipo:"CLT", mod:"Remoto", loc:"São Paulo, SP", pay:"A combinar", unit:"",
+   desc:"Empresa do setor de jogos online busca especialista para acompanhamento técnico do desenvolvimento de plataformas, atuando lado a lado com o time de desenvolvedores.",
+   req:["Visão integrada de back-end, front-end, integrações e bancos de dados","Orientação técnica ao time, sem gestão de pessoas","Boas práticas de estabilidade e escalabilidade"],
+   ben:["A combinar com a empresa"], fonte:"Robert Half", url:"https://www.roberthalf.com/br/pt/vagas/sao-paulo-sp/tecnologia"},
+
+  {t:"Consultor Comercial (Hunter)", c:"Consultoria B2B de tecnologia", cat:"Vendas",
+   tipo:"CLT", mod:"Remoto", loc:"São Paulo, SP", pay:"A combinar", unit:"",
+   desc:"Empresa de consultoria e tecnologia busca profissional focado em geração ativa de novos negócios e prospecção estratégica com base no perfil de cliente ideal (ICP).",
+   req:["Experiência em vendas B2B, de preferência em tecnologia ou consultoria","Prospecção e qualificação de decisores","Comunicação consultiva orientada a resultado"],
+   ben:["A combinar com a empresa"], fonte:"Robert Half", url:"https://www.roberthalf.com/br/pt/vagas/sao-paulo/consultor-comercial"},
+
+  {t:"Assistente Administrativo", c:"Empresa de saneamento básico", cat:"Administrativo",
+   tipo:"CLT", mod:"Presencial", loc:"São Paulo, SP", pay:"A combinar", unit:"",
+   desc:"Empresa do setor de saneamento, na Zona Sul de São Paulo, busca assistente administrativo para dar suporte direto à diretoria: agenda, reuniões, viagens e apoio geral do escritório.",
+   req:["Ensino médio completo ou graduação em curso","Inglês","Pacote Office básico"],
+   ben:["A combinar com a empresa"], fonte:"Robert Half", url:"https://www.roberthalf.com/br/pt/vagas/sao-paulo/assistente-administrativo"}
+];
+
+function seedVagasReais(){
+  try{
+    if(localStorage.getItem("txfreela:vagas_reais_v1")) return; // já rodou uma vez
+    const novas = VAGAS_REAIS_SP.map((v,i) => ({
+      id: "google-" + Date.now() + "-" + i,
+      t: v.t, c: v.c, co: siglaDe(v.c), bg: CORES[i % CORES.length],
+      tipo: v.tipo, mod: v.mod, loc: v.loc, cat: v.cat,
+      pay: v.pay, unit: v.unit, val: valorDe(v.pay),
+      ts: Date.now() - i*3600000,
+      desc: v.desc, req: v.req, ben: v.ben,
+      fonte: v.fonte, url: v.url
+    }));
+    JOBS = [...novas, ...JOBS];
+    saveJobs();
+    localStorage.setItem("txfreela:vagas_reais_v1", "1");
+  }catch(e){}
+}
+
 function saveJobs(){
   try{ localStorage.setItem("txfreela:vagas", JSON.stringify(JOBS)); }catch(e){}
 }
@@ -1056,25 +1138,67 @@ const CONTATO_PADRAO = {
 };
 
 /* ====== SERVIÇOS (os mesmos do Perfil da Empresa no Google) — padrão ====== */
-const SERVICOS_PADRAO = [
-  {icone:"📢", nome:"Divulgação de vagas CLT",        desc:"Sua vaga publicada na busca, com filtros de cidade, categoria e faixa salarial.", preco:"A partir de R$ 99 /vaga"},
-  {icone:"⚡", nome:"Publicação de freelas",           desc:"Projetos pontuais anunciados para freelancers já cadastrados na plataforma.",     preco:"A partir de R$ 59 /projeto"},
+/* Um serviço de divulgação/recrutamento para cada categoria de vaga do site (CATEGORIAS),
+   mais os serviços gerais da agência. */
+const ICONE_POR_CATEGORIA = {
+  "Marketing e Comunicação":  "📢",
+  "Tecnologia e TI":          "💻",
+  "Vendas":                   "🤝",
+  "Administrativo":           "🗂️",
+  "Logística e Operações":    "🚚",
+  "Saúde e Bem-estar":        "🩺",
+  "Construção e Manutenção":  "🛠️",
+  "Educação":                 "🎓",
+  "Outros":                   "🔧"
+};
+const SERVICOS_CATEGORIAS = CATEGORIAS.map(cat => ({
+  icone: ICONE_POR_CATEGORIA[cat] || "💼",
+  nome:  "Vagas de " + cat,
+  desc:  "Divulgação e triagem de candidatos para vagas CLT e freelas na área de " + cat + ".",
+  preco: "A partir de R$ 99 /vaga"
+}));
+const SERVICOS_GERAIS = [
   {icone:"🎯", nome:"Triagem de candidatos",           desc:"A gente filtra e ordena os currículos por aderência ao que você pediu.",          preco:"Sob consulta"},
   {icone:"📈", nome:"Gestão de tráfego pago",          desc:"Campanhas no Google e Meta para atrair candidatos ou clientes para sua empresa.", preco:"A partir de R$ 800 /mês"},
   {icone:"🎬", nome:"Social media e edição de vídeo",  desc:"Conteúdo mensal para redes sociais, com roteiro, edição e publicação.",           preco:"A partir de R$ 1.200 /mês"},
   {icone:"🏢", nome:"Perfil da empresa em destaque",   desc:"Sua marca destacada na home e no topo das buscas por categoria.",                 preco:"A partir de R$ 249 /mês"}
 ];
+const SERVICOS_PADRAO = [...SERVICOS_CATEGORIAS, ...SERVICOS_GERAIS];
 
 let CONTATO  = Object.assign({}, CONTATO_PADRAO);
 let SERVICOS = SERVICOS_PADRAO.map(s => Object.assign({}, s));
 let editIdx  = -1;
+
+/* ====== Vagas ao vivo no Google (Google para Empregos), por categoria ======
+   Não existe API pública do Google para isso, então em vez de copiar vagas de
+   terceiros (que ficam desatualizadas e podem estar erradas), cada categoria
+   abre a busca de empregos do Google já filtrada — sempre em tempo real. */
+const ICONE_GJOBS = ICONE_POR_CATEGORIA || {};
+function linkGoogleJobs(categoria){
+  const q = "vagas de " + categoria + " em São Paulo";
+  return "https://www.google.com/search?q=" + encodeURIComponent(q) + "&ibp=htl;jobs";
+}
+function renderGoogleJobsPanel(){
+  const el = document.getElementById("gjobsGrid");
+  if(!el) return;
+  el.innerHTML = CATEGORIAS.map(cat => `
+    <a class="gjobs-item" href="${linkGoogleJobs(cat)}" target="_blank" rel="noopener">
+      <span class="ic">${ICONE_POR_CATEGORIA[cat] || "💼"}</span>
+      <span>${esc(cat)}</span>
+      <span class="go">Ver →</span>
+    </a>`).join("");
+}
 
 function carregarPerfil(){
   try{
     const c = JSON.parse(localStorage.getItem("txfreela:contato")  || "null");
     const v = JSON.parse(localStorage.getItem("txfreela:servicos") || "null");
     if(c && typeof c === "object") CONTATO = Object.assign({}, CONTATO_PADRAO, c);
-    if(Array.isArray(v)) SERVICOS = v;
+    // Se a versão salva ainda for a lista antiga (6 serviços, sem os de categoria),
+    // atualiza para a nova lista com todos os tipos de vaga.
+    const versaoAntiga = Array.isArray(v) && v.length === 6 &&
+      v.some(s => s.nome === "Divulgação de vagas CLT" || s.nome === "Publicação de freelas");
+    if(Array.isArray(v) && !versaoAntiga) SERVICOS = v;
   }catch(e){}
 }
 function salvarPerfil(){
@@ -1320,7 +1444,7 @@ function render(){
     <button class="job" onclick="openJob('${j.id}')">
       <div class="co" style="background:${j.bg}">${esc(j.co)}</div>
       <div class="job-main">
-        <div class="job-title"><h3>${esc(j.t)}</h3><span class="tag ${tagClass(j.tipo)}">${j.tipo}</span></div>
+        <div class="job-title"><h3>${esc(j.t)}</h3><span class="tag ${tagClass(j.tipo)}">${j.tipo}</span>${j.url ? '<span class="tag" style="background:rgba(66,133,244,.16);color:#8ab4ff">🔎 Vaga real</span>' : ''}</div>
         <div class="company">${esc(j.c)}</div>
         <div class="job-meta"><span>${esc(j.loc)}</span><span>${j.mod}</span><span>${quando(j)}</span></div>
       </div>
@@ -1355,8 +1479,13 @@ function openJob(id){
     <div>
       <div class="card-light apply-box">
         <h4 style="margin-top:0">Interessado nesta vaga?</h4>
+        ${j.url ? `
+        <p style="color:var(--paper-muted);font-size:14px;margin-top:8px">Vaga real, publicada em <b>${esc(j.fonte||"site parceiro")}</b>. A candidatura é feita lá, direto com a empresa.</p>
+        <a class="btn btn-primary btn-block" style="margin-top:16px" href="${j.url}" target="_blank" rel="noopener">Candidatar-se no ${esc(j.fonte||"site original")}</a>
+        ` : `
         <p style="color:var(--paper-muted);font-size:14px;margin-top:8px">Sua candidatura vai com o perfil que você já cadastrou.</p>
         <button class="btn btn-primary btn-block" style="margin-top:16px" onclick="aplicar(this)">Candidatar-se</button>
+        `}
         <button class="btn btn-outline btn-block" style="margin-top:10px;color:var(--paper-ink);border-color:#dfe6f2" onclick="demo()">Salvar vaga</button>
       </div>
       <div class="panel" style="margin-top:14px">
@@ -1490,7 +1619,7 @@ function openDash(kind){
 }
 
 /* ---------- init ---------- */
-loadJobs(); carregarPerfil(); buildChips(); refresh(); montarContato(); renderServicos();
+loadJobs(); seedVagasReais(); carregarPerfil(); buildChips(); refresh(); montarContato(); renderServicos(); renderGoogleJobsPanel();
 document.getElementById("heroSearch").addEventListener("keydown", e=>{ if(e.key==="Enter") heroSearch(); });
 document.getElementById("fSearch").addEventListener("keydown", e=>{ if(e.key==="Enter") render(); });
 </script>
